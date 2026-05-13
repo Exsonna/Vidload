@@ -19,9 +19,18 @@ Eventual monetization via **ExtensionPay** — $4.99 one-time unlock above a 3-d
 |---|---|---|
 | v0.1 | shipped | Direct `<video src="...mp4">` detection + download; popup UI; webRequest observation |
 | v0.2 | shipped | HLS (`.m3u8`) download via offscreen document — playlist parsing, AES-128 decryption, segment concatenation. **No FFmpeg, no bundler** — see [[hls-download-approach]] |
-| v0.3 | planned | Site adapters: IG, TikTok, Twitter. Two-build flag. Self-host build adds YouTube. DASH support |
+| v0.3 | shipped | **Two-build flag** via `build.mjs` (no bundler) — webstore + selfhost outputs. TikTok adapter (both builds). YouTube adapter stub (selfhost only). URL-pattern matching fallback in webRequest. See [[two-build-architecture]] |
+| v0.3.1 | planned | Real YouTube extraction (signature-cipher decoding from player JS). DASH (`.mpd`) parser. IG/Twitter blob URL extraction |
 | v0.4 | planned | ExtensionPay integration — $4.99 lifetime unlock |
 | v0.5+ | future | Web Store submission, marketing site, polish |
+
+## Building release artifacts
+
+```
+node build.mjs
+```
+
+Produces `dist/webstore/` (load this for Web Store submission) and `dist/selfhost/` (zip and host on our own site for sideload). The source `extension/` keeps every adapter for local development — load it unpacked when iterating.
 
 ## When you (Claude) start a new conversation here
 

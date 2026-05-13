@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "VidLoad",
-  "version": "0.2.0",
-  "description": "Save HTML5 and HLS videos from any webpage to your computer.",
+  "version": "0.3.0",
+  "description": "Save videos from any webpage to your computer.",
   "permissions": ["downloads", "storage", "webRequest", "offscreen"],
   "host_permissions": ["<all_urls>"],
   "action": {
@@ -28,6 +28,16 @@
       "js": ["content/content-script.js"],
       "run_at": "document_idle",
       "all_frames": false
+    },
+    {
+      "matches": ["*://*.tiktok.com/*"],
+      "js": ["adapters/tiktok.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://*.youtube.com/*"],
+      "js": ["adapters/youtube.js"],
+      "run_at": "document_idle"
     }
   ]
 }

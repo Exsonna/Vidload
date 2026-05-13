@@ -6,6 +6,7 @@ Top-level map. Read this first to orient before any wiki work.
 
 - [[chrome-extension-policy]] — why VidLoad ships as two builds (Web Store + self-hosted)
 - [[hls-download-approach]] — why v0.2 ships HLS support without FFmpeg/Vite
+- [[two-build-architecture]] — how `build.mjs` produces webstore + selfhost outputs, and the adapter contract
 
 ## Entities
 
@@ -18,5 +19,6 @@ _People, companies, products. Add as `- [[Name]] — one-line tag`._
 
 ## Recently revised
 
+- [[two-build-architecture]] — 2026-05-14 — v0.3 design note
 - [[hls-download-approach]] — 2026-05-13 — v0.2 design note
 - [[chrome-extension-policy]] — 2026-05-13 — initial seed

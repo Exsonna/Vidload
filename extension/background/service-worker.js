@@ -1,18 +1,25 @@
 // VidLoad background service worker (MV3)
-// - Receives <video> sightings from content scripts
-// - Observes network responses with video/HLS/DASH Content-Type
+// - Receives <video> sightings from content scripts and site adapters
+// - Observes network responses with video/HLS/DASH Content-Type or URL pattern
 // - Stores per-tab detected media in chrome.storage.session
 // - Routes direct downloads to chrome.downloads, HLS downloads to the offscreen doc
 
 const STORAGE_KEY = (tabId) => `tab:${tabId}`;
 const OFFSCREEN_URL = 'offscreen/offscreen.html';
 
-function classify(contentType) {
+function classifyContentType(contentType) {
   if (!contentType) return null;
   const ct = contentType.toLowerCase();
   if (ct.startsWith('video/')) return 'direct';
   if (ct.includes('mpegurl')) return 'hls';
   if (ct.includes('dash+xml')) return 'dash';
+  return null;
+}
+
+function classifyByUrl(url) {
+  if (/\.m3u8(\?|$)/i.test(url)) return 'hls';
+  if (/\.mpd(\?|$)/i.test(url)) return 'dash';
+  if (/\.(mp4|webm|mov|m4v|m4a)(\?|$)/i.test(url)) return 'direct';
   return null;
 }
 
@@ -68,20 +75,19 @@ function makeJobId() {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  // Messages addressed to the offscreen doc are forwarded by Chrome's runtime;
-  // we only handle messages without a target (default = SW) here.
   if (msg?.target && msg.target !== 'sw') return false;
 
   if (msg?.type === 'media-found' && sender.tab?.id !== undefined) {
     const tabId = sender.tab.id;
     const now = Date.now();
+    const source = msg.source || 'dom';
     Promise.all(
       (msg.items || []).map((it) =>
         addItem(tabId, {
-          source: 'dom',
+          source,
           url: it.url,
           label: it.label || guessFilename(it.url),
-          kind: 'direct',
+          kind: it.kind || classifyByUrl(it.url) || 'direct',
           pageUrl: msg.pageUrl,
           ts: now,
         })
@@ -126,9 +132,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // Relay HLS progress/done/error broadcasts from offscreen to whoever's listening
-  // (popup, typically). The runtime delivers to *all* extension contexts; popup
-  // installs an onMessage listener and filters by jobId.
   return false;
 });
 
@@ -138,7 +141,7 @@ chrome.webRequest.onHeadersReceived.addListener(
     const header = details.responseHeaders?.find(
       (h) => h.name.toLowerCase() === 'content-type'
     );
-    const kind = classify(header?.value);
+    const kind = classifyContentType(header?.value) || classifyByUrl(details.url);
     if (!kind) return;
     addItem(details.tabId, {
       source: 'network',
