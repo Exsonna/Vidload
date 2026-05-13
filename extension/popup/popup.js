@@ -2,7 +2,7 @@ const listEl = document.getElementById('list');
 const statusEl = document.getElementById('status');
 const tpl = document.getElementById('row-template');
 
-// jobId -> { btn, kind, totalCached }
+// jobId -> { btn, kind }
 const activeJobs = new Map();
 
 async function getActiveTabId() {
@@ -27,13 +27,8 @@ function render(items) {
     const node = tpl.content.firstElementChild.cloneNode(true);
     node.querySelector('.name').textContent = item.label;
     const kindEl = node.querySelector('.kind');
-    kindEl.textContent = `${item.kind}${item.source === 'network' ? ' · network' : ''}`;
+    kindEl.textContent = `${item.kind}${item.source && item.source !== 'dom' ? ` · ${item.source}` : ''}`;
     const btn = node.querySelector('.dl');
-    if (item.kind === 'dash') {
-      // DASH not implemented yet; HLS supported.
-      setButton(btn, 'Soon', { disabled: true });
-      btn.title = 'DASH download support arrives in a later version.';
-    }
     btn.addEventListener('click', () => startDownload(item, btn));
     listEl.appendChild(node);
   });
@@ -41,21 +36,22 @@ function render(items) {
 
 async function startDownload(item, btn) {
   setButton(btn, 'Saving…', { disabled: true });
-  if (item.kind === 'hls') {
+  if (item.kind === 'hls' || item.kind === 'dash') {
     const res = await chrome.runtime.sendMessage({
-      type: 'download-hls',
+      type: 'download-stream',
+      format: item.kind,
       url: item.url,
       filename: item.label,
     });
     if (!res?.ok) {
       setButton(btn, 'Retry');
-      console.error('VidLoad HLS start failed:', res?.error);
+      console.error('VidLoad stream start failed:', res?.error);
       return;
     }
-    activeJobs.set(res.jobId, { btn, kind: 'hls' });
+    activeJobs.set(res.jobId, { btn, kind: item.kind });
     return;
   }
-  // Direct download path (v0.1)
+  // Direct download path
   const res = await chrome.runtime.sendMessage({
     type: 'download',
     url: item.url,
@@ -71,22 +67,17 @@ async function startDownload(item, btn) {
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (!msg?.jobId || !activeJobs.has(msg.jobId)) return;
-  const job = activeJobs.get(msg.jobId);
-  const { btn } = job;
-  if (msg.type === 'hls-progress') {
-    if (msg.phase === 'manifest') {
-      setButton(btn, 'Reading…', { disabled: true });
-    } else if (msg.phase === 'save') {
-      setButton(btn, 'Finalizing…', { disabled: true });
-    } else {
-      setButton(btn, `${msg.current}/${msg.total}`, { disabled: true });
-    }
-  } else if (msg.type === 'hls-done') {
+  const { btn } = activeJobs.get(msg.jobId);
+  if (msg.type === 'stream-progress') {
+    if (msg.phase === 'manifest') setButton(btn, 'Reading…', { disabled: true });
+    else if (msg.phase === 'save') setButton(btn, 'Finalizing…', { disabled: true });
+    else setButton(btn, `${msg.current}/${msg.total}`, { disabled: true });
+  } else if (msg.type === 'stream-done') {
     setButton(btn, 'Saved', { disabled: true });
     activeJobs.delete(msg.jobId);
-  } else if (msg.type === 'hls-error') {
+  } else if (msg.type === 'stream-error') {
     setButton(btn, 'Retry');
-    console.error('VidLoad HLS error:', msg.error);
+    console.error('VidLoad stream error:', msg.error);
     activeJobs.delete(msg.jobId);
   }
 });

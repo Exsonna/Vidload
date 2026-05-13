@@ -20,7 +20,8 @@ Eventual monetization via **ExtensionPay** — $4.99 one-time unlock above a 3-d
 | v0.1 | shipped | Direct `<video src="...mp4">` detection + download; popup UI; webRequest observation |
 | v0.2 | shipped | HLS (`.m3u8`) download via offscreen document — playlist parsing, AES-128 decryption, segment concatenation. **No FFmpeg, no bundler** — see [[hls-download-approach]] |
 | v0.3 | shipped | **Two-build flag** via `build.mjs` (no bundler) — webstore + selfhost outputs. TikTok adapter (both builds). YouTube adapter stub (selfhost only). URL-pattern matching fallback in webRequest. See [[two-build-architecture]] |
-| v0.3.1 | planned | Real YouTube extraction (signature-cipher decoding from player JS). DASH (`.mpd`) parser. IG/Twitter blob URL extraction |
+| v0.3.1 | shipped | DASH (`.mpd`) download via shared offscreen pipeline. Unified `stream-*` message protocol replaces `hls-*`. See [[dash-download-approach]] |
+| v0.3.2 | planned | Real YouTube extraction (signature-cipher decoding). IG/Twitter blob URL extraction. Audio+video muxing for DASH streams with separate audio Representations |
 | v0.4 | planned | ExtensionPay integration — $4.99 lifetime unlock |
 | v0.5+ | future | Web Store submission, marketing site, polish |
 

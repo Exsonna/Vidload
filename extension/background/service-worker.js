@@ -115,13 +115,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  if (msg?.type === 'download-hls' && msg.url) {
+  if (msg?.type === 'download-stream' && msg.url) {
     const jobId = makeJobId();
+    const format = msg.format === 'dash' ? 'dash' : 'hls';
     ensureOffscreenDocument()
       .then(() => {
         chrome.runtime.sendMessage({
           target: 'offscreen',
-          type: 'fetch-hls',
+          type: 'fetch-stream',
+          format,
           jobId,
           url: msg.url,
           filename: msg.filename,
