@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>VidLoad</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>VidLoad</h1>
+      <p id="status">Scanning…</p>
+    </header>
+    <ul id="list"></ul>
+    <template id="row-template">
+      <li class="row">
+        <div class="meta">
+          <div class="name"></div>
+          <div class="kind"></div>
+        </div>
+        <button class="dl" type="button">Download</button>
+      </li>
+    </template>
+    <script src="popup.js"></script>
+  </body>
+</html>

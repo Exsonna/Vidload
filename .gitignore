@@ -1,0 +1,15 @@
+# Dependencies (added in v0.2 when a bundler arrives)
+node_modules/
+dist/
+build/
+
+# Environment
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
