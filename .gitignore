@@ -13,3 +13,6 @@ Thumbs.db
 *.swp
 .vscode/
 .idea/
+
+# Claude session tracking (PostToolUse hook output)
+chats/_outputs.jsonl
