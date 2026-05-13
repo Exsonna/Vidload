@@ -26,6 +26,22 @@ const ADAPTERS = {
       run_at: 'document_idle',
     },
   },
+  instagram: {
+    file: 'adapters/instagram.js',
+    contentScript: {
+      matches: ['*://*.instagram.com/*'],
+      js: ['adapters/instagram.js'],
+      run_at: 'document_idle',
+    },
+  },
+  twitter: {
+    file: 'adapters/twitter.js',
+    contentScript: {
+      matches: ['*://*.twitter.com/*', '*://*.x.com/*'],
+      js: ['adapters/twitter.js'],
+      run_at: 'document_idle',
+    },
+  },
   youtube: {
     file: 'adapters/youtube.js',
     contentScript: {
@@ -39,11 +55,11 @@ const ADAPTERS = {
 const BUILDS = {
   webstore: {
     description: 'Save HTML5 and HLS videos from any webpage to your computer.',
-    adapters: ['tiktok'],
+    adapters: ['tiktok', 'instagram', 'twitter'],
   },
   selfhost: {
     description: 'Save videos from any webpage, including major social platforms.',
-    adapters: ['tiktok', 'youtube'],
+    adapters: ['tiktok', 'instagram', 'twitter', 'youtube'],
   },
 };
 

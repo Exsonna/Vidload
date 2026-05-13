@@ -20,7 +20,7 @@ _People, companies, products. Add as `- [[Name]] — one-line tag`._
 
 ## Recently revised
 
+- [[two-build-architecture]] — 2026-05-14 — IG + Twitter adapters added (v0.3.2)
 - [[dash-download-approach]] — 2026-05-14 — v0.3.1 design note
-- [[two-build-architecture]] — 2026-05-14 — v0.3 design note
 - [[hls-download-approach]] — 2026-05-13 — v0.2 design note
 - [[chrome-extension-policy]] — 2026-05-13 — initial seed

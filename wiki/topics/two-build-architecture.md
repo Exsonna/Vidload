@@ -8,8 +8,8 @@ Release artifacts come from `node build.mjs` and land in `dist/`:
 
 | Build | Output | Includes | Purpose |
 |---|---|---|---|
-| `webstore` | `dist/webstore/` | generic + TikTok adapter | Chrome Web Store submission |
-| `selfhost` | `dist/selfhost/` | generic + TikTok + YouTube | `.crx` distribution from our own site |
+| `webstore` | `dist/webstore/` | generic + TikTok + Instagram + Twitter | Chrome Web Store submission |
+| `selfhost` | `dist/selfhost/` | webstore set + YouTube | `.crx` distribution from our own site |
 
 The Web Store build contains **zero references to YouTube** — verified by grep after every build. This is the policy compliance line (see [[chrome-extension-policy]]).
 
@@ -58,11 +58,29 @@ The SW dedupes by URL within a tab and surfaces the items in the popup just like
 - Reports both standard and HD variants when present
 - Ships in **both** webstore and selfhost builds
 
+### Instagram (`adapters/instagram.js`)
+- Targets reels and posts (stories require auth, out of scope)
+- Scrapes `<meta property="og:video*">` tags
+- Pulls media URLs from `<script type="application/json">` blocks via regex
+  matching `video_url` / `playback_url` keys and any `url` field pointing
+  at `.mp4`/`.m3u8`/`.mpd`
+- Best-effort: Instagram aggressively rotates its JSON structure
+- Ships in **both** webstore and selfhost builds
+
+### Twitter / X (`adapters/twitter.js`)
+- Matches both `twitter.com` and `x.com`
+- Scrapes `<meta name="twitter:player:stream">` and `og:video*` tags
+- Pulls Twimg URLs from `<script type="application/json"|"application/ld+json">` blocks
+- Mostly augments the network observer (which already catches `video.twimg.com`
+  HLS streams when the user plays the tweet) by providing a better filename
+  label (e.g. `twitter-username-tweetid` vs the raw CDN URL)
+- Ships in **both** webstore and selfhost builds
+
 ### YouTube (`adapters/youtube.js`) — minimal stub
 - Reads `ytInitialPlayerResponse.streamingData`
 - Reports only URLs without `signatureCipher` (most YouTube URLs ARE signed and need player-JS-derived signatures; that's a separate project)
 - Ships in **selfhost only**
-- Real signature-cipher support arrives in v0.3.1
+- Real signature-cipher support deferred to a focused future session
 
 ## See also
 
