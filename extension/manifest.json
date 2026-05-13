@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "VidLoad",
-  "version": "0.1.0",
-  "description": "Save HTML5 videos from any webpage to your computer.",
-  "permissions": ["downloads", "storage", "webRequest"],
+  "version": "0.2.0",
+  "description": "Save HTML5 and HLS videos from any webpage to your computer.",
+  "permissions": ["downloads", "storage", "webRequest", "offscreen"],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_popup": "popup/popup.html",

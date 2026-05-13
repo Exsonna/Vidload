@@ -2,9 +2,10 @@
 // - Receives <video> sightings from content scripts
 // - Observes network responses with video/HLS/DASH Content-Type
 // - Stores per-tab detected media in chrome.storage.session
-// - Handles download requests from the popup
+// - Routes direct downloads to chrome.downloads, HLS downloads to the offscreen doc
 
 const STORAGE_KEY = (tabId) => `tab:${tabId}`;
+const OFFSCREEN_URL = 'offscreen/offscreen.html';
 
 function classify(contentType) {
   if (!contentType) return null;
@@ -44,7 +45,33 @@ async function addItem(tabId, item) {
   await setTabItems(tabId, items);
 }
 
+async function ensureOffscreenDocument() {
+  const contexts = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT'],
+  });
+  if (contexts.length > 0) return;
+  try {
+    await chrome.offscreen.createDocument({
+      url: OFFSCREEN_URL,
+      reasons: ['BLOBS'],
+      justification: 'Concatenate and decrypt HLS video segments into a downloadable file.',
+    });
+  } catch (err) {
+    if (!String(err.message || '').includes('Only a single offscreen')) throw err;
+  }
+}
+
+let jobCounter = 0;
+function makeJobId() {
+  jobCounter += 1;
+  return `job-${Date.now()}-${jobCounter}`;
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Messages addressed to the offscreen doc are forwarded by Chrome's runtime;
+  // we only handle messages without a target (default = SW) here.
+  if (msg?.target && msg.target !== 'sw') return false;
+
   if (msg?.type === 'media-found' && sender.tab?.id !== undefined) {
     const tabId = sender.tab.id;
     const now = Date.now();
@@ -82,6 +109,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg?.type === 'download-hls' && msg.url) {
+    const jobId = makeJobId();
+    ensureOffscreenDocument()
+      .then(() => {
+        chrome.runtime.sendMessage({
+          target: 'offscreen',
+          type: 'fetch-hls',
+          jobId,
+          url: msg.url,
+          filename: msg.filename,
+        });
+        sendResponse({ ok: true, jobId });
+      })
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
+  }
+
+  // Relay HLS progress/done/error broadcasts from offscreen to whoever's listening
+  // (popup, typically). The runtime delivers to *all* extension contexts; popup
+  // installs an onMessage listener and filters by jobId.
   return false;
 });
 

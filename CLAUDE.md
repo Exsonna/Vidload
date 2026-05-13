@@ -17,9 +17,9 @@ Eventual monetization via **ExtensionPay** — $4.99 one-time unlock above a 3-d
 
 | Version | Status | Scope |
 |---|---|---|
-| v0.1 | shipped (this commit) | Direct `<video src="...mp4">` detection + download; popup UI; webRequest observation |
-| v0.2 | next | HLS (`.m3u8`) + DASH support via FFmpeg.wasm; add Vite bundler |
-| v0.3 | planned | Site adapters: IG, TikTok, Twitter. Two-build flag. Self-host build adds YouTube |
+| v0.1 | shipped | Direct `<video src="...mp4">` detection + download; popup UI; webRequest observation |
+| v0.2 | shipped | HLS (`.m3u8`) download via offscreen document — playlist parsing, AES-128 decryption, segment concatenation. **No FFmpeg, no bundler** — see [[hls-download-approach]] |
+| v0.3 | planned | Site adapters: IG, TikTok, Twitter. Two-build flag. Self-host build adds YouTube. DASH support |
 | v0.4 | planned | ExtensionPay integration — $4.99 lifetime unlock |
 | v0.5+ | future | Web Store submission, marketing site, polish |
 
