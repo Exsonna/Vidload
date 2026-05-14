@@ -354,8 +354,13 @@ function render() {
     maybeProbeDuration(item, durEl);
     node.querySelector('.thumb-kind').textContent = item.kind;
 
-    const sizeStr = formatBytes(item.bytes);
+    // Tiny "bytes" on HLS/DASH items is the manifest text size, not the video
+    // size. The actual video is the sum of all segments, which we don't know
+    // until the offscreen engine downloads them. Hide that misleading number.
     const sizePill = node.querySelector('.size-pill');
+    const isManifestSize = (item.kind === 'hls' || item.kind === 'dash') &&
+      item.bytes != null && item.bytes < 50 * 1024;
+    const sizeStr = isManifestSize ? null : formatBytes(item.bytes);
     if (sizeStr) sizePill.textContent = sizeStr;
     else sizePill.remove();
 
@@ -445,9 +450,11 @@ async function startDownload(item, btn) {
   }
   if (res?.ok) {
     setDownloadButton(btn, 'Saved', { disabled: true });
+    btn.title = '';
     refreshTier();
   } else {
     setDownloadButton(btn, 'Retry');
+    btn.title = `Download failed: ${res?.error || 'unknown error'}`;
     console.error('VidLoad download failed:', res?.error);
   }
 }
@@ -459,11 +466,14 @@ chrome.runtime.onMessage.addListener((msg) => {
     if (msg.phase === 'manifest') setDownloadButton(btn, 'Reading…', { disabled: true });
     else if (msg.phase === 'save') setDownloadButton(btn, 'Finalizing…', { disabled: true });
     else setDownloadButton(btn, `${msg.current}/${msg.total}`, { disabled: true });
+    btn.title = '';
   } else if (msg.type === 'stream-done') {
     setDownloadButton(btn, 'Saved', { disabled: true });
+    btn.title = '';
     activeJobs.delete(msg.jobId);
   } else if (msg.type === 'stream-error') {
     setDownloadButton(btn, 'Retry');
+    btn.title = `Download failed: ${msg.error || 'unknown error'}`;
     console.error('VidLoad stream error:', msg.error);
     activeJobs.delete(msg.jobId);
   }

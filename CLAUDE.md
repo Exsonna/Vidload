@@ -29,7 +29,8 @@ Eventual monetization via **ExtensionPay** — $4.99 one-time unlock above a 3-d
 | v0.3.7 | shipped | **Context-aware filenames.** Content script walks the DOM near each `<video>` to find the nearest on-page name (Instagram handle, Twitter handle, generic heading). Also tracks the video closest to viewport center as the "active context" and broadcasts it to the SW so network-observed URLs get tagged with a meaningful filename. Saved files become `zara.040110.mp4` / `1000x_stocks.mp4` instead of `abc123.mp4` |
 | v0.4 | shipped | **ExtensionPay monetization scaffolding** — gating logic + paywall UI + status badge + daily counter. Currently **disabled by default** (MONETIZATION.enabled = false). Flip to true and replace `lib/extpay.js` with the real SDK to activate. See [[monetization]] |
 | v0.4.1 | shipped | Lazy duration probe for HLS/DASH items — popup fetches the manifest, sums `#EXTINF` or parses `mediaPresentationDuration`, updates the thumbnail overlay. Format pill regex now recognizes `m4s`/`m4v`/`mkv`/`avi` so the pill matches the saved file extension |
-| v0.4.2 | planned | YouTube signature-cipher extraction. DASH audio+video muxing. HLS variant picker. Real icons + Web Store screenshots + Privacy Policy doc |
+| v0.4.2 | shipped | Better context detection on Twitter-style feeds (which don't render `<video>` until played) — tracker now falls back to `<article>` in viewport, then to URL-pattern inference. Manifest-size bytes pill hidden for HLS/DASH items <50KB (was confusingly showing "449 B" when the actual video is MB). Retry button now exposes the underlying error as a tooltip |
+| v0.4.3 | planned | YouTube signature-cipher extraction. DASH audio+video muxing. HLS variant picker. Real icons + Web Store screenshots + Privacy Policy doc |
 | v0.4 | planned | ExtensionPay integration — $4.99 lifetime unlock |
 | v0.5+ | future | Web Store submission, marketing site, polish |
 

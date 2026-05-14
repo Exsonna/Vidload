@@ -122,8 +122,73 @@ function report() {
   } catch (_) { /* extension context invalidated mid-navigation */ }
 }
 
+function findCenterArticle() {
+  // Pages like Twitter don't render <video> elements until the user plays a
+  // tweet's video — so video-based viewport tracking finds nothing. Walk
+  // <article> containers instead so we still know which post is in view.
+  const center = window.innerHeight / 2;
+  let best = null;
+  let bestDist = Infinity;
+  document.querySelectorAll('article, [role="article"]').forEach((a) => {
+    const r = a.getBoundingClientRect();
+    if (r.bottom < 0 || r.top > window.innerHeight) return;
+    if (r.width === 0 && r.height === 0) return;
+    const c = (r.top + r.bottom) / 2;
+    const d = Math.abs(c - center);
+    if (d < bestDist) { bestDist = d; best = a; }
+  });
+  if (!best) return null;
+  // Reuse findContextForVideo's article logic — pass any descendant as the
+  // "anchor". A dummy text node won't work, so look for any heading or link directly.
+  const links = best.querySelectorAll('header a[href^="/"], a[href^="/"]');
+  for (const link of links) {
+    const href = link.getAttribute('href') || '';
+    if (/\/(p|reel|reels|tv|status|photo|video)\//.test(href)) continue;
+    const text = (link.textContent || '').trim().split('\n')[0].trim();
+    if (text && text.length > 0 && text.length < 60 && !looksLikeTimestamp(text)) {
+      return text;
+    }
+  }
+  return null;
+}
+
+function inferFromUrl() {
+  const host = location.hostname;
+  const path = location.pathname;
+
+  // Twitter/X status: /handle/status/id
+  let m = path.match(/^\/([^/]+)\/status\/(\d+)/);
+  if (m) return m[1];
+
+  // Twitter/X profile: /handle (excluding reserved routes)
+  if (/(?:twitter|x)\.com$/i.test(host)) {
+    m = path.match(/^\/([^/]+)\/?$/);
+    if (m && !/^(home|explore|notifications|messages|i|search|settings|compose|tos|privacy)$/i.test(m[1])) {
+      return m[1];
+    }
+  }
+
+  // Instagram reel/post/tv: /(p|reel|reels|tv)/id
+  m = path.match(/^\/(?:p|reel|reels|tv)\/([^/]+)/);
+  if (m) return `instagram-${m[1]}`;
+
+  // Instagram profile: /username (excluding reserved routes)
+  if (/instagram\.com$/i.test(host)) {
+    m = path.match(/^\/([^/]+)\/?$/);
+    if (m && !/^(direct|explore|reels|stories|p|accounts|about)$/i.test(m[1])) {
+      return m[1];
+    }
+  }
+
+  // TikTok: /@user/video/id or /@user
+  m = path.match(/^\/(@[^/]+)/);
+  if (m) return m[1];
+
+  return null;
+}
+
 function updateActiveContext() {
-  // Find video closest to viewport center.
+  // Tier 1: <video> closest to viewport center
   const center = window.innerHeight / 2;
   let bestVideo = null;
   let bestDist = Infinity;
@@ -131,15 +196,20 @@ function updateActiveContext() {
     const r = v.getBoundingClientRect();
     if (r.bottom < 0 || r.top > window.innerHeight) return;
     if (r.width === 0 && r.height === 0) return;
-    const videoCenter = (r.top + r.bottom) / 2;
-    const dist = Math.abs(videoCenter - center);
-    if (dist < bestDist) {
-      bestDist = dist;
-      bestVideo = v;
-    }
+    const c = (r.top + r.bottom) / 2;
+    const d = Math.abs(c - center);
+    if (d < bestDist) { bestDist = d; bestVideo = v; }
   });
 
-  const next = bestVideo ? findContextForVideo(bestVideo) : null;
+  let next = bestVideo ? findContextForVideo(bestVideo) : null;
+
+  // Tier 2: <article> closest to viewport center (Twitter renders these
+  // even when their video isn't mounted yet)
+  if (!next) next = findCenterArticle();
+
+  // Tier 3: URL-pattern inference (handle/status/id, /reel/id, /@user, ...)
+  if (!next) next = inferFromUrl();
+
   if (next === activeContext) return;
   activeContext = next;
   try {
