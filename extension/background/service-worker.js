@@ -10,6 +10,65 @@
 importScripts('/lib/extpay.js');
 
 // =============================================================================
+// Referer rewrite rules
+// =============================================================================
+// Some CDNs (video.twimg.com, *.fbcdn.net, *.cdninstagram.com, *.tiktokcdn.com)
+// reject media requests when the Referer header is the extension's
+// chrome-extension:// origin — even though we hold host permissions. These
+// dynamic rules rewrite the Referer to look like a normal in-page fetch.
+//
+// tabIds: [-1] scopes the rule to requests that don't originate from a
+// browser tab — i.e. our SW, offscreen document, and popup. The user's
+// normal browsing is unaffected because tab requests have their own tabId.
+const REFERER_RULES = [
+  {
+    id: 1001,
+    priority: 1,
+    action: {
+      type: 'modifyHeaders',
+      requestHeaders: [{ header: 'Referer', operation: 'set', value: 'https://x.com/' }],
+    },
+    condition: { requestDomains: ['twimg.com'], tabIds: [-1] },
+  },
+  {
+    id: 1002,
+    priority: 1,
+    action: {
+      type: 'modifyHeaders',
+      requestHeaders: [{ header: 'Referer', operation: 'set', value: 'https://www.instagram.com/' }],
+    },
+    condition: { requestDomains: ['fbcdn.net', 'cdninstagram.com'], tabIds: [-1] },
+  },
+  {
+    id: 1003,
+    priority: 1,
+    action: {
+      type: 'modifyHeaders',
+      requestHeaders: [{ header: 'Referer', operation: 'set', value: 'https://www.tiktok.com/' }],
+    },
+    condition: { requestDomains: ['tiktokcdn.com', 'tiktokcdn-us.com'], tabIds: [-1] },
+  },
+];
+
+async function setupRefererRules() {
+  try {
+    const existing = await chrome.declarativeNetRequest.getDynamicRules();
+    const ourIds = existing.filter((r) => r.id >= 1001 && r.id <= 1099).map((r) => r.id);
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: ourIds,
+      addRules: REFERER_RULES,
+    });
+    console.log('[VidLoad SW] Referer rewrite rules registered:', REFERER_RULES.length);
+  } catch (err) {
+    console.error('[VidLoad SW] Failed to set up Referer rules', err);
+  }
+}
+
+setupRefererRules();
+chrome.runtime.onInstalled.addListener(() => setupRefererRules());
+chrome.runtime.onStartup.addListener(() => setupRefererRules());
+
+// =============================================================================
 // Monetization configuration — see wiki/topics/monetization.md
 // =============================================================================
 const MONETIZATION = {
