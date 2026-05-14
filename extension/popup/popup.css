@@ -12,11 +12,37 @@ header {
   background: #fff;
 }
 
+.header-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
 header h1 {
-  margin: 0 0 2px 0;
+  margin: 0;
   font-size: 14px;
   font-weight: 600;
   letter-spacing: 0.2px;
+}
+
+#tier-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 3px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+#tier-badge.pro {
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+  color: #fff;
+}
+
+#tier-badge.free {
+  background: #e5e7eb;
+  color: #4b5563;
 }
 
 #status {
@@ -50,6 +76,97 @@ footer {
 }
 
 #toggle-hidden:hover { text-decoration: underline; }
+
+/* ==========================================================================
+   Paywall
+   ========================================================================== */
+
+#paywall {
+  padding: 28px 24px 20px;
+  text-align: center;
+  background: #fff;
+}
+
+.paywall-icon {
+  font-size: 36px;
+  color: #f59e0b;
+  margin-bottom: 8px;
+}
+
+#paywall h2 {
+  margin: 0 0 6px 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: #111827;
+}
+
+#paywall-detail {
+  margin: 0 0 18px 0;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.upsell {
+  margin: 0 0 18px 0;
+  padding: 16px;
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  border: 1px solid #fbbf24;
+  border-radius: 8px;
+}
+
+.upsell-price {
+  font-size: 28px;
+  font-weight: 800;
+  color: #92400e;
+  letter-spacing: -0.5px;
+}
+
+.upsell-details {
+  font-size: 11px;
+  color: #78350f;
+  font-weight: 500;
+  margin-top: 2px;
+}
+
+#upgrade-btn {
+  display: block;
+  width: 100%;
+  background: #2b6cb0;
+  color: #fff;
+  border: 0;
+  border-radius: 6px;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  letter-spacing: 0.3px;
+  margin-bottom: 8px;
+}
+
+#upgrade-btn:hover { background: #1e4e80; }
+
+#paywall-back {
+  display: block;
+  width: 100%;
+  background: none;
+  color: #6b7280;
+  border: 0;
+  padding: 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+#paywall-back:hover { color: #111827; text-decoration: underline; }
+
+#paywall-foot {
+  margin: 14px 0 0 0;
+  font-size: 10px;
+  color: #9ca3af;
+}
+
+/* ==========================================================================
+   Item rows
+   ========================================================================== */
 
 .row {
   display: grid;

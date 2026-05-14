@@ -5,12 +5,92 @@
 // - Dedupes byte-range chunks of the same media into one canonical item
 // - Stores per-tab detected media in chrome.storage.session
 // - Routes direct downloads to chrome.downloads, segmented downloads to offscreen
+// - Gates downloads via ExtensionPay (free tier + $4.99 lifetime unlock)
+
+importScripts('/lib/extpay.js');
+
+// =============================================================================
+// Monetization configuration — see wiki/topics/monetization.md
+// =============================================================================
+const MONETIZATION = {
+  enabled: false,                    // flip to true once ExtPay is configured
+  extpayId: 'vidload',               // replace with your extensionpay.com id
+  freeDailyLimit: 3,                 // downloads/day on the free tier
+  priceLabel: '$4.99 one-time',      // shown in the paywall UI
+};
+
+let extpay = null;
+if (MONETIZATION.enabled && typeof ExtPay === 'function') {
+  extpay = ExtPay(MONETIZATION.extpayId);
+  extpay.startBackground();
+  extpay.onPaid.addListener((user) => {
+    console.log('[VidLoad] payment received', user);
+  });
+}
+
+const DOWNLOAD_COUNTER_KEY = 'vidload_downloads';
+
+function todayKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+async function getDownloadStats() {
+  const today = todayKey();
+  const stored = await chrome.storage.local.get(DOWNLOAD_COUNTER_KEY);
+  const data = stored[DOWNLOAD_COUNTER_KEY] || { date: today, count: 0 };
+  if (data.date !== today) {
+    data.date = today;
+    data.count = 0;
+  }
+  return data;
+}
+
+async function bumpDownloadCount() {
+  const data = await getDownloadStats();
+  data.count += 1;
+  await chrome.storage.local.set({ [DOWNLOAD_COUNTER_KEY]: data });
+  return data.count;
+}
+
+async function isPaid() {
+  if (!MONETIZATION.enabled) return true;
+  if (!extpay) return false;
+  try {
+    const user = await extpay.getUser();
+    return !!user.paid;
+  } catch (err) {
+    console.error('[VidLoad] paid check failed', err);
+    return false;
+  }
+}
+
+async function gateDownload() {
+  if (await isPaid()) return { allowed: true, paid: true };
+  const data = await getDownloadStats();
+  if (data.count >= MONETIZATION.freeDailyLimit) {
+    return {
+      allowed: false,
+      paid: false,
+      limit: MONETIZATION.freeDailyLimit,
+      used: data.count,
+      priceLabel: MONETIZATION.priceLabel,
+    };
+  }
+  return {
+    allowed: true,
+    paid: false,
+    limit: MONETIZATION.freeDailyLimit,
+    used: data.count,
+  };
+}
+
+// =============================================================================
+// Media detection + storage
+// =============================================================================
 
 const STORAGE_KEY = (tabId) => `tab:${tabId}`;
 const OFFSCREEN_URL = 'offscreen/offscreen.html';
 
-// Query params that vary across byte-range requests for the same media.
-// Stripping them collapses many chunks into one canonical URL.
 const RANGE_NOISE_PARAMS = [
   'bytestart', 'byteend',
   'range',
@@ -73,16 +153,12 @@ async function upsertItem(tabId, item) {
     for (const k of ['poster', 'width', 'height', 'duration', 'pageTitle', 'description', 'contextLabel']) {
       if (existing[k] == null && item[k] != null) existing[k] = item[k];
     }
-    // Prefer the largest observed byte count (full-file size from Content-Range
-    // beats a single chunk's Content-Length).
     if (item.bytes && (!existing.bytes || item.bytes > existing.bytes)) {
       existing.bytes = item.bytes;
     }
-    // Prefer an adapter-supplied source over the generic 'network' source.
     if (existing.source === 'network' && item.source && item.source !== 'network') {
       existing.source = item.source;
     }
-    // Canonicalize URL to the no-range form once we've seen it.
     existing.url = key;
     await setTabItems(tabId, items);
     return;
@@ -114,12 +190,11 @@ function makeJobId() {
   return `job-${Date.now()}-${jobCounter}`;
 }
 
-// Per-tab "active context label" — the on-page name (Instagram handle,
-// Twitter handle, heading) of the <video> currently closest to viewport
-// center. Updated by content-script scroll/mutation events. Used to
-// tag network-observed URLs (which arrive without a DOM tie) with a
-// meaningful filename.
 const activeContexts = new Map();
+
+// =============================================================================
+// Message router
+// =============================================================================
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.target && msg.target !== 'sw') return false;
@@ -127,6 +202,36 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === 'active-context' && sender.tab?.id !== undefined) {
     if (msg.label) activeContexts.set(sender.tab.id, msg.label);
     else activeContexts.delete(sender.tab.id);
+    return false;
+  }
+
+  if (msg?.type === 'get-status') {
+    (async () => {
+      const data = await getDownloadStats();
+      const paid = await isPaid();
+      sendResponse({
+        monetizationEnabled: MONETIZATION.enabled,
+        paid,
+        limit: MONETIZATION.freeDailyLimit,
+        used: data.count,
+        priceLabel: MONETIZATION.priceLabel,
+      });
+    })();
+    return true;
+  }
+
+  if (msg?.type === 'open-payment-page') {
+    if (extpay) {
+      extpay.openPaymentPage();
+      sendResponse({ ok: true });
+    } else {
+      sendResponse({
+        ok: false,
+        error: MONETIZATION.enabled
+          ? 'ExtPay not initialized'
+          : 'Monetization is disabled in this build',
+      });
+    }
     return false;
   }
 
@@ -164,24 +269,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg?.type === 'download' && msg.url) {
-    chrome.downloads.download(
-      { url: msg.url, filename: msg.filename, saveAs: false },
-      (downloadId) => {
-        if (chrome.runtime.lastError) {
-          sendResponse({ ok: false, error: chrome.runtime.lastError.message });
-        } else {
-          sendResponse({ ok: true, downloadId });
-        }
+    (async () => {
+      const gate = await gateDownload();
+      if (!gate.allowed) {
+        sendResponse({ ok: false, error: 'paywall', ...gate });
+        return;
       }
-    );
+      chrome.downloads.download(
+        { url: msg.url, filename: msg.filename, saveAs: false },
+        async (downloadId) => {
+          if (chrome.runtime.lastError) {
+            sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+          } else {
+            await bumpDownloadCount();
+            sendResponse({ ok: true, downloadId });
+          }
+        }
+      );
+    })();
     return true;
   }
 
   if (msg?.type === 'download-stream' && msg.url) {
-    const jobId = makeJobId();
-    const format = msg.format === 'dash' ? 'dash' : 'hls';
-    ensureOffscreenDocument()
-      .then(() => {
+    (async () => {
+      const gate = await gateDownload();
+      if (!gate.allowed) {
+        sendResponse({ ok: false, error: 'paywall', ...gate });
+        return;
+      }
+      const jobId = makeJobId();
+      const format = msg.format === 'dash' ? 'dash' : 'hls';
+      try {
+        await ensureOffscreenDocument();
         chrome.runtime.sendMessage({
           target: 'offscreen',
           type: 'fetch-stream',
@@ -190,9 +309,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           url: msg.url,
           filename: msg.filename,
         });
+        await bumpDownloadCount();
         sendResponse({ ok: true, jobId });
-      })
-      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+      } catch (err) {
+        sendResponse({ ok: false, error: String(err?.message || err) });
+      }
+    })();
     return true;
   }
 
@@ -200,7 +322,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 function parseTotalBytes(headers) {
-  // Content-Range: bytes 0-1023/12345678  → 12345678 is the total file size
   const cr = headers.find((h) => h.name.toLowerCase() === 'content-range');
   if (cr?.value) {
     const m = cr.value.match(/\/(\d+)\s*$/);

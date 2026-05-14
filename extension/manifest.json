@@ -1,10 +1,14 @@
 {
   "manifest_version": 3,
   "name": "VidLoad",
-  "version": "0.3.7",
+  "version": "0.4.0",
   "description": "Save videos from any webpage to your computer.",
   "permissions": ["downloads", "storage", "webRequest", "offscreen"],
   "host_permissions": ["<all_urls>"],
+  "externally_connectable": {
+    "ids": ["mglhalcjmiibmdejaiclmcfemmkmkfkk"],
+    "matches": ["https://extensionpay.com/*"]
+  },
   "action": {
     "default_popup": "popup/popup.html",
     "default_title": "VidLoad — detected videos",

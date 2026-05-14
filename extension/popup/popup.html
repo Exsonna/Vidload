@@ -7,9 +7,26 @@
   </head>
   <body>
     <header>
-      <h1>VidLoad</h1>
+      <div class="header-row">
+        <h1>VidLoad</h1>
+        <span id="tier-badge" hidden></span>
+      </div>
       <p id="status">Scanning…</p>
     </header>
+
+    <section id="paywall" hidden>
+      <div class="paywall-icon">★</div>
+      <h2>Free limit reached</h2>
+      <p id="paywall-detail">You've used your free downloads for today.</p>
+      <div class="upsell">
+        <div class="upsell-price" id="paywall-price">$4.99</div>
+        <div class="upsell-details">One-time payment · lifetime unlimited downloads</div>
+      </div>
+      <button id="upgrade-btn" type="button">Upgrade to Pro</button>
+      <button id="paywall-back" type="button">Back to videos</button>
+      <p id="paywall-foot"></p>
+    </section>
+
     <ul id="list"></ul>
     <footer>
       <button id="toggle-hidden" type="button" hidden></button>

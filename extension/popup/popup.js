@@ -1,7 +1,16 @@
 const listEl = document.getElementById('list');
 const statusEl = document.getElementById('status');
+const tierBadgeEl = document.getElementById('tier-badge');
 const tpl = document.getElementById('row-template');
 const toggleEl = document.getElementById('toggle-hidden');
+const paywallEl = document.getElementById('paywall');
+const paywallDetailEl = document.getElementById('paywall-detail');
+const paywallPriceEl = document.getElementById('paywall-price');
+const paywallFootEl = document.getElementById('paywall-foot');
+const upgradeBtn = document.getElementById('upgrade-btn');
+const paywallBackBtn = document.getElementById('paywall-back');
+const footerEl = document.querySelector('footer');
+const headerEl = document.querySelector('header');
 
 const MIN_DIRECT_BYTES = 100 * 1024;
 
@@ -9,6 +18,7 @@ const activeJobs = new Map();
 let allItems = [];
 let showHidden = false;
 const dismissed = new Set();
+let tierStatus = { monetizationEnabled: false, paid: true };
 
 async function getActiveTabId() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -54,8 +64,6 @@ function hostFromUrl(url) {
 }
 
 function shortHost(url) {
-  // Collapse long CDN hostnames like instagram.fhkg4-2.fna.fbcdn.net → fbcdn.net.
-  // For 2-segment hosts (instagram.com) returns as-is.
   const h = hostFromUrl(url);
   if (!h) return '';
   const parts = h.split('.');
@@ -102,7 +110,7 @@ function sanitizeFilename(s) {
 }
 
 function extensionForItem(item) {
-  if (item.kind === 'hls' || item.kind === 'dash') return ''; // engine appends .mp4/.ts
+  if (item.kind === 'hls' || item.kind === 'dash') return '';
   try {
     const m = new URL(item.url).pathname.match(/\.(\w{2,4})(?:$|\?)/);
     if (m) return '.' + m[1].toLowerCase();
@@ -137,11 +145,11 @@ function chooseFilename(item) {
 
 function ensureExtension(base, item) {
   const ext = extensionForItem(item);
-  if (!ext) return base; // HLS/DASH — engine decides
+  if (!ext) return base;
   return new RegExp(`${ext.replace('.', '\\.')}$`, 'i').test(base) ? base : `${base}${ext}`;
 }
 
-function makeTitleEditable(titleEl, item, rowEl) {
+function makeTitleEditable(titleEl, item) {
   titleEl.contentEditable = 'true';
   titleEl.focus();
   const range = document.createRange();
@@ -184,6 +192,52 @@ async function copyUrl(item, btn) {
   }
 }
 
+function renderTier(status) {
+  tierStatus = status;
+  if (!status.monetizationEnabled) {
+    tierBadgeEl.hidden = true;
+    return;
+  }
+  tierBadgeEl.hidden = false;
+  if (status.paid) {
+    tierBadgeEl.textContent = 'Pro';
+    tierBadgeEl.className = 'pro';
+  } else {
+    tierBadgeEl.textContent = `Free · ${status.used}/${status.limit}`;
+    tierBadgeEl.className = 'free';
+  }
+}
+
+function showPaywall(detail) {
+  paywallEl.hidden = false;
+  listEl.hidden = true;
+  footerEl.hidden = true;
+  if (detail) {
+    paywallDetailEl.textContent = `You've used ${detail.used} of ${detail.limit} free downloads today.`;
+    if (detail.priceLabel) paywallPriceEl.textContent = detail.priceLabel.replace(/\s+one-time.*$/i, '') || '$4.99';
+  }
+  paywallFootEl.textContent = tierStatus.monetizationEnabled
+    ? 'Counter resets at midnight local time.'
+    : 'Monetization is disabled in this build — this is a preview of the paywall UI.';
+}
+
+function hidePaywall() {
+  paywallEl.hidden = true;
+  listEl.hidden = false;
+  footerEl.hidden = false;
+}
+
+upgradeBtn.addEventListener('click', async () => {
+  const res = await chrome.runtime.sendMessage({ type: 'open-payment-page' });
+  if (!res?.ok) {
+    paywallFootEl.textContent = res?.error || 'Could not open payment page.';
+    return;
+  }
+  window.close();
+});
+
+paywallBackBtn.addEventListener('click', () => hidePaywall());
+
 function render() {
   const filtered = allItems.filter((it) => !dismissed.has(it.url));
   const visible = showHidden ? filtered : filtered.filter((it) => !isFilteredOut(it));
@@ -215,7 +269,6 @@ function render() {
 
   visible.forEach((item) => {
     const node = tpl.content.firstElementChild.cloneNode(true);
-
     const titleEl = node.querySelector('.title');
     titleEl.textContent = chooseTitle(item);
 
@@ -253,7 +306,7 @@ function render() {
 
     node.querySelector('.edit-btn').addEventListener('click', (e) => {
       e.stopPropagation();
-      makeTitleEditable(titleEl, item, node);
+      makeTitleEditable(titleEl, item);
     });
 
     node.querySelector('.dismiss').addEventListener('click', () => {
@@ -276,6 +329,12 @@ toggleEl.addEventListener('click', () => {
   render();
 });
 
+async function refreshTier() {
+  const status = await chrome.runtime.sendMessage({ type: 'get-status' });
+  if (status) renderTier(status);
+  return status;
+}
+
 async function startDownload(item, btn) {
   setDownloadButton(btn, 'Saving…', { disabled: true });
   const filename = chooseFilename(item);
@@ -286,12 +345,18 @@ async function startDownload(item, btn) {
       url: item.url,
       filename,
     });
+    if (res?.error === 'paywall') {
+      setDownloadButton(btn, 'Download');
+      showPaywall(res);
+      return;
+    }
     if (!res?.ok) {
       setDownloadButton(btn, 'Retry');
       console.error('VidLoad stream start failed:', res?.error);
       return;
     }
     activeJobs.set(res.jobId, { btn });
+    refreshTier();
     return;
   }
   const res = await chrome.runtime.sendMessage({
@@ -299,8 +364,14 @@ async function startDownload(item, btn) {
     url: item.url,
     filename,
   });
+  if (res?.error === 'paywall') {
+    setDownloadButton(btn, 'Download');
+    showPaywall(res);
+    return;
+  }
   if (res?.ok) {
     setDownloadButton(btn, 'Saved', { disabled: true });
+    refreshTier();
   } else {
     setDownloadButton(btn, 'Retry');
     console.error('VidLoad download failed:', res?.error);
@@ -325,6 +396,7 @@ chrome.runtime.onMessage.addListener((msg) => {
 });
 
 (async () => {
+  await refreshTier();
   const tabId = await getActiveTabId();
   if (tabId === undefined) {
     statusEl.textContent = 'No active tab.';

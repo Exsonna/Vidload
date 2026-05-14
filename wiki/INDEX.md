@@ -8,6 +8,7 @@ Top-level map. Read this first to orient before any wiki work.
 - [[hls-download-approach]] — why v0.2 ships HLS support without FFmpeg/Vite
 - [[two-build-architecture]] — how `build.mjs` produces webstore + selfhost outputs, and the adapter contract
 - [[dash-download-approach]] — v0.3.1 DASH support and the unified stream pipeline
+- [[monetization]] — ExtensionPay $4.99 one-time unlock, free tier counter, paywall UI
 
 ## Entities
 
@@ -20,6 +21,7 @@ _People, companies, products. Add as `- [[Name]] — one-line tag`._
 
 ## Recently revised
 
+- [[monetization]] — 2026-05-14 — v0.4 design note
 - [[two-build-architecture]] — 2026-05-14 — IG + Twitter adapters added (v0.3.2)
 - [[dash-download-approach]] — 2026-05-14 — v0.3.1 design note
 - [[hls-download-approach]] — 2026-05-13 — v0.2 design note
