@@ -24,7 +24,8 @@ Eventual monetization via **ExtensionPay** — $4.99 one-time unlock above a 3-d
 | v0.3.2 | shipped | Instagram + Twitter/X site adapters (best-effort meta-tag + JSON-block scrapers). Both ship in webstore build alongside TikTok. See [[two-build-architecture]] |
 | v0.3.3 | shipped | Popup UX overhaul — thumbnails, descriptions, file size, resolution, duration. Adapters now extract richer metadata (cover image, dimensions, duration); webRequest captures Content-Length; items deduped via upsert merge |
 | v0.3.4 | shipped | Popup polish v2 — VideoHelper-style card layout. **Size filter** hides direct/network items <100KB (probe responses / sub-segments). Quality badge (1080p / 4K / etc.) overlaid on thumbnail. Play-icon placeholder for missing posters. Gibberish-URL labels collapse to "Video on <host>". "Show N hidden" toggle for power users |
-| v0.3.5 | planned | YouTube signature-cipher extraction (its own project). DASH audio+video muxing |
+| v0.3.5 | shipped | Card row redesign matching reference UI — bigger thumb (128×72), three thumb overlays (quality top-left, duration bottom-left, kind bottom-right), color-coded format badge inline with title, **rename** (inline contenteditable), **dismiss** (X), **copy URL** (kebab), larger Download button with download icon |
+| v0.3.6 | planned | YouTube signature-cipher extraction (its own project). DASH audio+video muxing. HLS variant picker (use the now-unused "quality dropdown" affordance) |
 | v0.4 | planned | ExtensionPay integration — $4.99 lifetime unlock |
 | v0.5+ | future | Web Store submission, marketing site, polish |
 

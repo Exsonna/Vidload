@@ -3,23 +3,20 @@ const statusEl = document.getElementById('status');
 const tpl = document.getElementById('row-template');
 const toggleEl = document.getElementById('toggle-hidden');
 
-// Minimum byte size for a direct/network item to be considered "real video".
-// Anything smaller is almost always a probe response, adaptive sub-segment,
-// or otherwise not a user-facing video. Items with metadata (poster, dimensions,
-// duration, description) or non-direct kinds bypass this filter.
 const MIN_DIRECT_BYTES = 100 * 1024;
 
 const activeJobs = new Map();
 let allItems = [];
 let showHidden = false;
+const dismissed = new Set();
 
 async function getActiveTabId() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab?.id;
 }
 
-function setButton(btn, text, opts = {}) {
-  btn.textContent = text;
+function setDownloadButton(btn, text, opts = {}) {
+  btn.querySelector('.dl-label').textContent = text;
   btn.disabled = !!opts.disabled;
 }
 
@@ -60,7 +57,6 @@ function looksLikeGibberish(s) {
   if (!s) return true;
   const cleaned = s.replace(/\.\w{1,5}$/, '').replace(/[-_]/g, '');
   if (cleaned.length < 12) return false;
-  // High-entropy alphanumeric strings with no spaces = encrypted CDN paths
   return /^[A-Za-z0-9+/=]+$/.test(cleaned) && cleaned.length >= 16;
 }
 
@@ -69,14 +65,26 @@ function hasMetadata(item) {
 }
 
 function isFilteredOut(item) {
-  if (item.kind !== 'direct') return false; // HLS/DASH playlists pass
-  if (item.source !== 'network') return false; // Adapter/DOM items pass
+  if (item.kind !== 'direct') return false;
+  if (item.source !== 'network') return false;
   if (hasMetadata(item)) return false;
   if (item.bytes != null && item.bytes < MIN_DIRECT_BYTES) return true;
   return false;
 }
 
+function formatFromKind(item) {
+  if (item.kind === 'hls') return 'HLS';
+  if (item.kind === 'dash') return 'MPD';
+  try {
+    const path = new URL(item.url).pathname;
+    const m = path.match(/\.(mp4|webm|mov|m4v|m4a|ts)(?:$|\?)/i);
+    if (m) return m[1].toUpperCase();
+  } catch {}
+  return 'MP4';
+}
+
 function chooseTitle(item) {
+  if (item.userLabel) return item.userLabel;
   if (item.description) return item.description;
   if (item.pageTitle && item.source !== 'network') return item.pageTitle;
   if (looksLikeGibberish(item.label)) {
@@ -86,24 +94,53 @@ function chooseTitle(item) {
   return item.label;
 }
 
-function chooseSub(item) {
-  const parts = [];
-  const q = qualityLabel(item.width, item.height);
-  if (q) parts.push(q);
-  if (item.width && item.height && !q) parts.push(`${item.width}×${item.height}`);
-  const dur = formatDuration(item.duration);
-  if (dur) parts.push(dur);
-  const size = formatBytes(item.bytes);
-  if (size) parts.push(size);
-  if (item.source && item.source !== 'dom' && item.source !== 'network') {
-    parts.push(item.source);
+function makeTitleEditable(titleEl, item, rowEl) {
+  titleEl.contentEditable = 'true';
+  titleEl.focus();
+  const range = document.createRange();
+  range.selectNodeContents(titleEl);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+
+  const finish = (commit) => {
+    titleEl.contentEditable = 'false';
+    titleEl.removeEventListener('blur', onBlur);
+    titleEl.removeEventListener('keydown', onKey);
+    if (commit) {
+      const next = titleEl.textContent.trim();
+      if (next) {
+        item.userLabel = next;
+        item.label = next;
+      }
+    }
+    titleEl.textContent = chooseTitle(item);
+  };
+
+  const onBlur = () => finish(true);
+  const onKey = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { finish(false); }
+  };
+
+  titleEl.addEventListener('blur', onBlur);
+  titleEl.addEventListener('keydown', onKey);
+}
+
+async function copyUrl(item, btn) {
+  try {
+    await navigator.clipboard.writeText(item.url);
+    btn.classList.add('copied');
+    setTimeout(() => btn.classList.remove('copied'), 1200);
+  } catch (e) {
+    console.error('VidLoad: clipboard write failed', e);
   }
-  return parts.join(' · ');
 }
 
 function render() {
-  const visible = showHidden ? allItems : allItems.filter((it) => !isFilteredOut(it));
-  const hiddenCount = allItems.length - (showHidden ? allItems.length : visible.length);
+  const filtered = allItems.filter((it) => !dismissed.has(it.url));
+  const visible = showHidden ? filtered : filtered.filter((it) => !isFilteredOut(it));
+  const hiddenCount = filtered.length - visible.length;
 
   listEl.replaceChildren();
   if (allItems.length === 0) {
@@ -111,8 +148,13 @@ function render() {
     toggleEl.hidden = true;
     return;
   }
+  if (filtered.length === 0) {
+    statusEl.textContent = 'All items dismissed.';
+    toggleEl.hidden = true;
+    return;
+  }
   if (visible.length === 0) {
-    statusEl.textContent = `${allItems.length} item${allItems.length === 1 ? '' : 's'} detected — all filtered as probes/segments.`;
+    statusEl.textContent = `${filtered.length} item${filtered.length === 1 ? '' : 's'} detected — all filtered as probes/segments.`;
   } else if (hiddenCount > 0) {
     statusEl.textContent = `${visible.length} video${visible.length === 1 ? '' : 's'} · ${hiddenCount} small item${hiddenCount === 1 ? '' : 's'} hidden.`;
   } else {
@@ -121,15 +163,34 @@ function render() {
 
   toggleEl.hidden = hiddenCount === 0 && !showHidden;
   toggleEl.textContent = showHidden
-    ? `Hide small items (${allItems.length - allItems.filter((it) => !isFilteredOut(it)).length})`
+    ? 'Hide small probe items'
     : `Show ${hiddenCount} hidden small item${hiddenCount === 1 ? '' : 's'}`;
 
   visible.forEach((item) => {
     const node = tpl.content.firstElementChild.cloneNode(true);
 
-    node.querySelector('.title').textContent = chooseTitle(item);
-    node.querySelector('.sub').textContent = chooseSub(item) || item.kind.toUpperCase();
-    node.querySelector('.url').textContent = hostFromUrl(item.url);
+    const titleEl = node.querySelector('.title');
+    titleEl.textContent = chooseTitle(item);
+
+    const formatBadge = node.querySelector('.format-badge');
+    formatBadge.textContent = formatFromKind(item);
+    formatBadge.classList.add(item.kind);
+
+    node.querySelector('.thumb-quality').textContent = qualityLabel(item.width, item.height) || '';
+    node.querySelector('.thumb-duration').textContent = formatDuration(item.duration) || '';
+    node.querySelector('.thumb-kind').textContent = item.kind;
+
+    const sizeStr = formatBytes(item.bytes);
+    const sizePill = node.querySelector('.size-pill');
+    if (sizeStr) sizePill.textContent = sizeStr;
+    else sizePill.remove();
+
+    const sourcePill = node.querySelector('.source-pill');
+    const sourceText = item.source && item.source !== 'dom' && item.source !== 'network'
+      ? item.source
+      : hostFromUrl(item.url);
+    if (sourceText) sourcePill.textContent = sourceText;
+    else sourcePill.remove();
 
     const thumbImg = node.querySelector('.thumb-img');
     if (item.poster) {
@@ -139,12 +200,22 @@ function render() {
       thumbImg.classList.add('broken');
     }
 
-    const q = qualityLabel(item.width, item.height);
-    node.querySelector('.thumb-quality').textContent = q || '';
-    node.querySelector('.thumb-kind').textContent = item.kind;
+    node.querySelector('.edit-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      makeTitleEditable(titleEl, item, node);
+    });
 
-    const btn = node.querySelector('.dl');
-    btn.addEventListener('click', () => startDownload(item, btn));
+    node.querySelector('.dismiss').addEventListener('click', () => {
+      dismissed.add(item.url);
+      render();
+    });
+
+    const moreBtn = node.querySelector('.more');
+    moreBtn.addEventListener('click', () => copyUrl(item, moreBtn));
+
+    const dlBtn = node.querySelector('.dl');
+    dlBtn.addEventListener('click', () => startDownload(item, dlBtn));
+
     listEl.appendChild(node);
   });
 }
@@ -155,31 +226,32 @@ toggleEl.addEventListener('click', () => {
 });
 
 async function startDownload(item, btn) {
-  setButton(btn, 'Saving…', { disabled: true });
+  setDownloadButton(btn, 'Saving…', { disabled: true });
+  const filename = item.userLabel || item.label;
   if (item.kind === 'hls' || item.kind === 'dash') {
     const res = await chrome.runtime.sendMessage({
       type: 'download-stream',
       format: item.kind,
       url: item.url,
-      filename: item.label,
+      filename,
     });
     if (!res?.ok) {
-      setButton(btn, 'Retry');
+      setDownloadButton(btn, 'Retry');
       console.error('VidLoad stream start failed:', res?.error);
       return;
     }
-    activeJobs.set(res.jobId, { btn, kind: item.kind });
+    activeJobs.set(res.jobId, { btn });
     return;
   }
   const res = await chrome.runtime.sendMessage({
     type: 'download',
     url: item.url,
-    filename: item.label,
+    filename,
   });
   if (res?.ok) {
-    setButton(btn, 'Saved', { disabled: true });
+    setDownloadButton(btn, 'Saved', { disabled: true });
   } else {
-    setButton(btn, 'Retry');
+    setDownloadButton(btn, 'Retry');
     console.error('VidLoad download failed:', res?.error);
   }
 }
@@ -188,14 +260,14 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (!msg?.jobId || !activeJobs.has(msg.jobId)) return;
   const { btn } = activeJobs.get(msg.jobId);
   if (msg.type === 'stream-progress') {
-    if (msg.phase === 'manifest') setButton(btn, 'Reading…', { disabled: true });
-    else if (msg.phase === 'save') setButton(btn, 'Finalizing…', { disabled: true });
-    else setButton(btn, `${msg.current}/${msg.total}`, { disabled: true });
+    if (msg.phase === 'manifest') setDownloadButton(btn, 'Reading…', { disabled: true });
+    else if (msg.phase === 'save') setDownloadButton(btn, 'Finalizing…', { disabled: true });
+    else setDownloadButton(btn, `${msg.current}/${msg.total}`, { disabled: true });
   } else if (msg.type === 'stream-done') {
-    setButton(btn, 'Saved', { disabled: true });
+    setDownloadButton(btn, 'Saved', { disabled: true });
     activeJobs.delete(msg.jobId);
   } else if (msg.type === 'stream-error') {
-    setButton(btn, 'Retry');
+    setDownloadButton(btn, 'Retry');
     console.error('VidLoad stream error:', msg.error);
     activeJobs.delete(msg.jobId);
   }

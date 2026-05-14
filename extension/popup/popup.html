@@ -22,14 +22,33 @@
             <path d="M8 5v14l11-7z" />
           </svg>
           <span class="thumb-quality"></span>
+          <span class="thumb-duration"></span>
           <span class="thumb-kind"></span>
         </div>
-        <div class="meta">
-          <div class="title"></div>
-          <div class="sub"></div>
-          <div class="url"></div>
+        <div class="content">
+          <div class="content-head">
+            <span class="format-badge"></span>
+            <span class="title" tabindex="0"></span>
+            <button class="dismiss" type="button" title="Dismiss" aria-label="Dismiss">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+            </button>
+          </div>
+          <div class="content-foot">
+            <button class="edit-btn" type="button" title="Rename" aria-label="Rename">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a.996.996 0 000-1.41l-2.34-2.34a.996.996 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+            </button>
+            <span class="pill size-pill"></span>
+            <span class="pill source-pill"></span>
+            <span class="spacer"></span>
+            <button class="dl" type="button">
+              <svg class="dl-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+              <span class="dl-label">Download</span>
+            </button>
+            <button class="more" type="button" title="Copy URL" aria-label="More actions">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
+            </button>
+          </div>
         </div>
-        <button class="dl" type="button">Download</button>
       </li>
     </template>
     <script src="popup.js"></script>
