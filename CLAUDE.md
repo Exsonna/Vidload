@@ -22,7 +22,8 @@ Eventual monetization via **ExtensionPay** — $4.99 one-time unlock above a 3-d
 | v0.3 | shipped | **Two-build flag** via `build.mjs` (no bundler) — webstore + selfhost outputs. TikTok adapter (both builds). YouTube adapter stub (selfhost only). URL-pattern matching fallback in webRequest. See [[two-build-architecture]] |
 | v0.3.1 | shipped | DASH (`.mpd`) download via shared offscreen pipeline. Unified `stream-*` message protocol replaces `hls-*`. See [[dash-download-approach]] |
 | v0.3.2 | shipped | Instagram + Twitter/X site adapters (best-effort meta-tag + JSON-block scrapers). Both ship in webstore build alongside TikTok. See [[two-build-architecture]] |
-| v0.3.3 | planned | YouTube signature-cipher extraction (its own project). DASH audio+video muxing |
+| v0.3.3 | shipped | Popup UX overhaul — thumbnails, descriptions, file size, resolution, duration. Adapters now extract richer metadata (cover image, dimensions, duration); webRequest captures Content-Length; items deduped via upsert merge |
+| v0.3.4 | planned | YouTube signature-cipher extraction (its own project). DASH audio+video muxing |
 | v0.4 | planned | ExtensionPay integration — $4.99 lifetime unlock |
 | v0.5+ | future | Web Store submission, marketing site, polish |
 

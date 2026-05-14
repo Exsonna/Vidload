@@ -1,10 +1,7 @@
 // VidLoad Instagram adapter
-// Targets reels and posts. Scrapes:
-//   - <meta property="og:video" / og:video:url / og:video:secure_url>
-//   - <script type="application/json"> blocks for "video_url" / "playback_url"
-//     keys and any "url" fields pointing at .mp4/.m3u8/.mpd
-// Stories require auth and aren't in the public DOM — out of scope.
-// Modern IG rotates its JSON structure often; expect this to need updates.
+// Targets reels and posts. Scrapes og:* meta tags and JSON script blocks
+// for video URLs. Includes og:image as poster when present.
+// Stories require auth — out of scope.
 
 (() => {
   const log = (...args) => console.log('[VidLoad Instagram]', ...args);
@@ -23,21 +20,35 @@
     return t ? t.slice(0, 80) : `instagram-${Date.now()}`;
   }
 
+  function getMeta(prop, attr = 'property') {
+    const el = document.querySelector(`meta[${attr}="${prop}"]`);
+    const v = el?.getAttribute('content');
+    return v && /^https?:/i.test(v) ? v : null;
+  }
+
+  function getPoster() {
+    return getMeta('og:image') || getMeta('twitter:image', 'name');
+  }
+
+  function getDescription() {
+    return (
+      getMeta('og:description') ||
+      getMeta('description', 'name') ||
+      null
+    );
+  }
+
   function unescapeJsonUrl(s) {
-    return s
-      .replace(/\\u0026/g, '&')
-      .replace(/\\\//g, '/')
-      .replace(/\\"/g, '"');
+    return s.replace(/\\u0026/g, '&').replace(/\\\//g, '/').replace(/\\"/g, '"');
   }
 
   function fromMeta() {
     const items = [];
+    const poster = getPoster();
+    const description = getDescription();
     for (const prop of ['og:video', 'og:video:secure_url', 'og:video:url']) {
-      const el = document.querySelector(`meta[property="${prop}"]`);
-      const v = el?.getAttribute('content');
-      if (v && /^https?:/i.test(v)) {
-        items.push({ url: v, label: pageLabel(), kind: inferKind(v) });
-      }
+      const v = getMeta(prop);
+      if (v) items.push({ url: v, label: pageLabel(), kind: inferKind(v), poster, description });
     }
     return items;
   }
@@ -45,6 +56,8 @@
   function fromJsonBlocks() {
     const items = [];
     const seen = new Set();
+    const poster = getPoster();
+    const description = getDescription();
     const patterns = [
       /"video_url"\s*:\s*"([^"]+)"/g,
       /"playback_url"\s*:\s*"([^"]+)"/g,
@@ -55,10 +68,9 @@
       for (const re of patterns) {
         for (const m of text.matchAll(re)) {
           const url = unescapeJsonUrl(m[1]);
-          if (seen.has(url)) continue;
-          if (!/^https?:\/\//.test(url)) continue;
+          if (seen.has(url) || !/^https?:\/\//.test(url)) continue;
           seen.add(url);
-          items.push({ url, label: pageLabel(), kind: inferKind(url) });
+          items.push({ url, label: pageLabel(), kind: inferKind(url), poster, description });
         }
       }
     });
@@ -79,6 +91,7 @@
         source: 'instagram',
         items,
         pageUrl: location.href,
+        pageTitle: document.title,
       });
     } catch { /* extension reloaded */ }
   }

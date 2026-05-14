@@ -1,9 +1,8 @@
-// VidLoad YouTube adapter (self-host build only — not bundled into Web Store build).
-//
-// Status: minimal. Extracts URLs from `ytInitialPlayerResponse.streamingData`
-// that are usable as-is (rare these days — most are signed and require
-// running YouTube's player JS to compute the signature). Full
-// signature-cipher support is its own project and lands in v0.3.1.
+// VidLoad YouTube adapter (self-host build only).
+// Reads ytInitialPlayerResponse for stream URLs. Reports only unsigned
+// URLs (most modern YouTube URLs need signature-cipher decoding — that
+// is a separate, larger project). Includes the highest-resolution
+// thumbnail and per-stream resolution/duration metadata.
 
 (() => {
   const log = (...args) => console.log('[VidLoad YouTube]', ...args);
@@ -25,11 +24,23 @@
     return null;
   }
 
+  function bestThumbnail(thumbnails) {
+    if (!Array.isArray(thumbnails) || thumbnails.length === 0) return null;
+    const sorted = [...thumbnails].sort((a, b) => (b.width || 0) - (a.width || 0));
+    return sorted[0]?.url || null;
+  }
+
   function report() {
     const data = findPlayerResponse();
     if (!data?.streamingData) return;
     const videoId = data.videoDetails?.videoId || 'video';
     const title = (data.videoDetails?.title || videoId).replace(/[\\/:*?"<>|]/g, '_').slice(0, 80);
+    const description = data.videoDetails?.shortDescription
+      ? data.videoDetails.shortDescription.replace(/\s+/g, ' ').slice(0, 200)
+      : null;
+    const durationSeconds = parseInt(data.videoDetails?.lengthSeconds || '0', 10) || null;
+    const poster = bestThumbnail(data.videoDetails?.thumbnail?.thumbnails);
+
     const all = [
       ...(data.streamingData.formats || []),
       ...(data.streamingData.adaptiveFormats || []),
@@ -46,6 +57,12 @@
         url: fmt.url,
         label: `${title}-${quality}.${ext}`,
         kind: 'direct',
+        poster,
+        description,
+        width: fmt.width || null,
+        height: fmt.height || null,
+        duration: durationSeconds,
+        bytes: fmt.contentLength ? parseInt(fmt.contentLength, 10) : null,
       });
     }
     log(`unsigned: ${items.length}, signed (skipped): ${skippedSigned}`);
@@ -61,6 +78,7 @@
         source: 'youtube',
         items: fresh,
         pageUrl: location.href,
+        pageTitle: document.title,
       });
     } catch { /* extension reloaded */ }
   }

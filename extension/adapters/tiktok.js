@@ -1,6 +1,7 @@
 // VidLoad TikTok adapter
-// Runs on tiktok.com pages, extracts video URLs from TikTok's hydration data
-// (__UNIVERSAL_DATA_FOR_REHYDRATION__) and reports them to the background SW.
+// Runs on tiktok.com pages, extracts video URLs and metadata from
+// __UNIVERSAL_DATA_FOR_REHYDRATION__ (cover image, dimensions, duration,
+// description, author).
 
 (() => {
   const log = (...args) => console.log('[VidLoad TikTok]', ...args);
@@ -22,21 +23,43 @@
       return [];
     }
     const found = [];
+    // Walk looking for objects that look like a TikTok video record:
+    // typically { id, desc, video: {playAddr, cover, width, height, ...}, author }
     const walk = (node) => {
       if (!node || typeof node !== 'object') return;
-      const desc = typeof node.desc === 'string' ? node.desc : null;
-      const id = typeof node.id === 'string' ? node.id : null;
-      const baseLabel = (desc || id || `tiktok-${Date.now()}`).replace(/\s+/g, ' ').slice(0, 80);
-      for (const [k, v] of Object.entries(node)) {
-        if (typeof v === 'string' && /^https?:/i.test(v) && (k === 'playAddr' || k === 'downloadAddr')) {
+      if (node.video && typeof node.video === 'object' && (node.video.playAddr || node.video.downloadAddr)) {
+        const v = node.video;
+        const author = node.author && (node.author.uniqueId || node.author.nickname);
+        const desc = typeof node.desc === 'string' ? node.desc.replace(/\s+/g, ' ').slice(0, 200) : null;
+        const baseLabel = author && node.id
+          ? `tiktok-${author}-${node.id}`
+          : (desc?.slice(0, 60) || `tiktok-${node.id || Date.now()}`).replace(/[\\/:*?"<>|]/g, '_');
+        const common = {
+          poster: typeof v.cover === 'string' ? v.cover : (typeof v.dynamicCover === 'string' ? v.dynamicCover : null),
+          width: Number.isFinite(v.width) ? v.width : null,
+          height: Number.isFinite(v.height) ? v.height : null,
+          duration: Number.isFinite(v.duration) ? v.duration : null,
+          description: desc,
+        };
+        if (typeof v.playAddr === 'string' && /^https?:/i.test(v.playAddr)) {
           found.push({
-            url: v,
-            label: k === 'downloadAddr' ? `${baseLabel} (hd)` : baseLabel,
-            kind: inferKind(v),
+            url: v.playAddr,
+            label: baseLabel,
+            kind: inferKind(v.playAddr),
+            ...common,
           });
-        } else if (v && typeof v === 'object') {
-          walk(v);
         }
+        if (typeof v.downloadAddr === 'string' && /^https?:/i.test(v.downloadAddr) && v.downloadAddr !== v.playAddr) {
+          found.push({
+            url: v.downloadAddr,
+            label: `${baseLabel} (hd)`,
+            kind: inferKind(v.downloadAddr),
+            ...common,
+          });
+        }
+      }
+      for (const v of Object.values(node)) {
+        if (v && typeof v === 'object') walk(v);
       }
     };
     walk(data);
@@ -57,15 +80,13 @@
         source: 'tiktok',
         items,
         pageUrl: location.href,
+        pageTitle: document.title,
       });
-    } catch {
-      /* extension reloaded mid-navigation */
-    }
+    } catch { /* extension reloaded mid-navigation */ }
   }
 
   report();
 
-  // TikTok is an SPA — re-scan on URL change.
   let lastUrl = location.href;
   new MutationObserver(() => {
     if (location.href !== lastUrl) {

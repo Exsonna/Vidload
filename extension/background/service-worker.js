@@ -1,8 +1,9 @@
 // VidLoad background service worker (MV3)
 // - Receives <video> sightings from content scripts and site adapters
 // - Observes network responses with video/HLS/DASH Content-Type or URL pattern
+// - Captures Content-Length when present
 // - Stores per-tab detected media in chrome.storage.session
-// - Routes direct downloads to chrome.downloads, HLS downloads to the offscreen doc
+// - Routes direct downloads to chrome.downloads, segmented downloads to offscreen
 
 const STORAGE_KEY = (tabId) => `tab:${tabId}`;
 const OFFSCREEN_URL = 'offscreen/offscreen.html';
@@ -44,9 +45,17 @@ async function setTabItems(tabId, items) {
   await chrome.storage.session.set({ [STORAGE_KEY(tabId)]: items });
 }
 
-async function addItem(tabId, item) {
+async function upsertItem(tabId, item) {
   const items = await getTabItems(tabId);
-  if (items.some((it) => it.url === item.url)) return;
+  const existing = items.find((it) => it.url === item.url);
+  if (existing) {
+    // Merge in any newly-known fields without overwriting existing values.
+    for (const k of ['poster', 'width', 'height', 'duration', 'bytes', 'pageTitle', 'description']) {
+      if (existing[k] == null && item[k] != null) existing[k] = item[k];
+    }
+    await setTabItems(tabId, items);
+    return;
+  }
   items.push(item);
   if (items.length > 50) items.splice(0, items.length - 50);
   await setTabItems(tabId, items);
@@ -61,7 +70,7 @@ async function ensureOffscreenDocument() {
     await chrome.offscreen.createDocument({
       url: OFFSCREEN_URL,
       reasons: ['BLOBS'],
-      justification: 'Concatenate and decrypt HLS video segments into a downloadable file.',
+      justification: 'Concatenate and decrypt HLS/DASH video segments into a downloadable file.',
     });
   } catch (err) {
     if (!String(err.message || '').includes('Only a single offscreen')) throw err;
@@ -81,14 +90,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const tabId = sender.tab.id;
     const now = Date.now();
     const source = msg.source || 'dom';
+    const pageTitle = msg.pageTitle || null;
     Promise.all(
       (msg.items || []).map((it) =>
-        addItem(tabId, {
+        upsertItem(tabId, {
           source,
           url: it.url,
           label: it.label || guessFilename(it.url),
           kind: it.kind || classifyByUrl(it.url) || 'direct',
           pageUrl: msg.pageUrl,
+          pageTitle,
+          description: it.description || null,
+          poster: it.poster || null,
+          width: it.width || null,
+          height: it.height || null,
+          duration: it.duration || null,
+          bytes: it.bytes || null,
           ts: now,
         })
       )
@@ -140,16 +157,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
     if (details.tabId < 0) return;
-    const header = details.responseHeaders?.find(
-      (h) => h.name.toLowerCase() === 'content-type'
-    );
-    const kind = classifyContentType(header?.value) || classifyByUrl(details.url);
+    const headers = details.responseHeaders || [];
+    const ctHeader = headers.find((h) => h.name.toLowerCase() === 'content-type');
+    const clHeader = headers.find((h) => h.name.toLowerCase() === 'content-length');
+    const kind = classifyContentType(ctHeader?.value) || classifyByUrl(details.url);
     if (!kind) return;
-    addItem(details.tabId, {
+    const bytes = clHeader?.value ? parseInt(clHeader.value, 10) : null;
+    upsertItem(details.tabId, {
       source: 'network',
       url: details.url,
       label: guessFilename(details.url),
       kind,
+      bytes: Number.isFinite(bytes) && bytes > 0 ? bytes : null,
       ts: Date.now(),
     });
   },

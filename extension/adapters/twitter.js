@@ -1,11 +1,7 @@
 // VidLoad Twitter / X adapter
-// Tweet videos are served via blob: URLs to <video> elements; the real
-// network URLs (typically video.twimg.com .m3u8 or .mp4) get caught by the
-// service worker's webRequest observer. This adapter's job is to:
-//   - Surface og:video / twitter:player:stream meta tags when present
-//   - Scrape any media URLs that leak into JSON script blocks
-//   - Provide a better filename label (tweet author + id) for items
-//     network-observed on the same page
+// Most tweet videos arrive via webRequest observation (video.twimg.com HLS).
+// This adapter augments those items with a better filename label and a
+// poster image scraped from og:image / twitter:image.
 
 (() => {
   const log = (...args) => console.log('[VidLoad Twitter]', ...args);
@@ -24,24 +20,37 @@
     return t ? t.slice(0, 80) : `twitter-${Date.now()}`;
   }
 
+  function getMeta(prop, attr = 'property') {
+    const el = document.querySelector(`meta[${attr}="${prop}"]`);
+    const v = el?.getAttribute('content');
+    return v && /^https?:/i.test(v) ? v : null;
+  }
+
+  function getPoster() {
+    return getMeta('og:image') || getMeta('twitter:image', 'name');
+  }
+
+  function getDescription() {
+    return getMeta('og:description') || getMeta('description', 'name') || null;
+  }
+
   function unescapeJsonUrl(s) {
     return s.replace(/\\u002F/gi, '/').replace(/\\\//g, '/').replace(/\\u0026/g, '&').replace(/\\"/g, '"');
   }
 
   function fromMeta() {
     const items = [];
+    const poster = getPoster();
+    const description = getDescription();
     const selectors = [
-      'meta[name="twitter:player:stream"]',
-      'meta[property="og:video"]',
-      'meta[property="og:video:url"]',
-      'meta[property="og:video:secure_url"]',
+      ['twitter:player:stream', 'name'],
+      ['og:video', 'property'],
+      ['og:video:url', 'property'],
+      ['og:video:secure_url', 'property'],
     ];
-    for (const sel of selectors) {
-      const el = document.querySelector(sel);
-      const v = el?.getAttribute('content');
-      if (v && /^https?:/i.test(v)) {
-        items.push({ url: v, label: pageLabel(), kind: inferKind(v) });
-      }
+    for (const [name, attr] of selectors) {
+      const v = getMeta(name, attr);
+      if (v) items.push({ url: v, label: pageLabel(), kind: inferKind(v), poster, description });
     }
     return items;
   }
@@ -49,6 +58,8 @@
   function fromJsonBlocks() {
     const items = [];
     const seen = new Set();
+    const poster = getPoster();
+    const description = getDescription();
     const mediaUrl = /"url"\s*:\s*"(https:\/\/(?:video\.twimg\.com|[^"]*\.twimg\.com)[^"]*\.(?:mp4|m3u8|mpd)(?:\?[^"]*)?)"/gi;
     document.querySelectorAll('script[type="application/ld+json"], script[type="application/json"]').forEach((el) => {
       const text = el.textContent || '';
@@ -56,7 +67,7 @@
         const url = unescapeJsonUrl(m[1]);
         if (seen.has(url)) continue;
         seen.add(url);
-        items.push({ url, label: pageLabel(), kind: inferKind(url) });
+        items.push({ url, label: pageLabel(), kind: inferKind(url), poster, description });
       }
     });
     return items;
@@ -76,6 +87,7 @@
         source: 'twitter',
         items,
         pageUrl: location.href,
+        pageTitle: document.title,
       });
     } catch { /* extension reloaded */ }
   }
