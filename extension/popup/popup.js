@@ -12,6 +12,29 @@ const paywallBackBtn = document.getElementById('paywall-back');
 const footerEl = document.querySelector('footer');
 const headerEl = document.querySelector('header');
 
+// Global error surfacer — drops a red banner above the list with the message
+// and stack head, so we can see uncaught failures without opening the popup's
+// DevTools. Hidden until an error fires.
+function showError(message) {
+  let banner = document.getElementById('vidload-error-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'vidload-error-banner';
+    banner.style.cssText =
+      'background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;border-radius:6px;' +
+      'margin:8px;padding:8px 10px;font-size:11px;font-family:ui-monospace,Menlo,Consolas,monospace;' +
+      'white-space:pre-wrap;word-break:break-word;';
+    document.body.insertBefore(banner, document.body.firstChild);
+  }
+  banner.textContent = String(message);
+}
+window.addEventListener('error', (ev) => {
+  showError(`Uncaught: ${ev.message}\n${ev.filename}:${ev.lineno}:${ev.colno}`);
+});
+window.addEventListener('unhandledrejection', (ev) => {
+  showError(`Unhandled rejection: ${ev.reason?.message || ev.reason}`);
+});
+
 const MIN_DIRECT_BYTES = 100 * 1024;
 
 const activeJobs = new Map();
@@ -205,7 +228,7 @@ async function probeStreamDuration(item) {
     if (item.kind === 'hls') return await computeHlsDuration(text, item.url);
     if (item.kind === 'dash') return computeDashDuration(text);
   } catch (err) {
-    console.debug('VidLoad: duration probe failed for', item.url, err.message);
+    console.debug('VidLoad: duration probe failed for', item?.url, err?.message || err);
   }
   return null;
 }
@@ -256,12 +279,16 @@ function maybeProbeDuration(item, durEl) {
   if (item.duration || item._probed) return;
   if (item.kind !== 'hls' && item.kind !== 'dash') return;
   item._probed = true;
-  probeStreamDuration(item).then((duration) => {
-    if (!duration) return;
-    item.duration = duration;
-    // Only update if the element is still in the DOM (popup might have closed).
-    if (durEl.isConnected) durEl.textContent = formatDuration(duration);
-  });
+  probeStreamDuration(item)
+    .then((duration) => {
+      if (!duration) return;
+      item.duration = duration;
+      // Only update if the element is still in the DOM (popup might have closed).
+      if (durEl && durEl.isConnected) durEl.textContent = formatDuration(duration);
+    })
+    .catch((err) => {
+      console.debug('VidLoad: probe promise rejected', err?.message || err);
+    });
 }
 
 function renderTier(status) {
@@ -340,6 +367,14 @@ function render() {
     : `Show ${hiddenCount} hidden small item${hiddenCount === 1 ? '' : 's'}`;
 
   visible.forEach((item) => {
+    try { renderRow(item); } catch (err) {
+      console.error('VidLoad: row render failed', item, err);
+      showError(`Row render failed: ${err?.message || err}`);
+    }
+  });
+}
+
+function renderRow(item) {
     const node = tpl.content.firstElementChild.cloneNode(true);
     const titleEl = node.querySelector('.title');
     titleEl.textContent = chooseTitle(item);
@@ -400,7 +435,6 @@ function render() {
     dlBtn.addEventListener('click', () => startDownload(item, dlBtn));
 
     listEl.appendChild(node);
-  });
 }
 
 toggleEl.addEventListener('click', () => {
@@ -480,13 +514,17 @@ chrome.runtime.onMessage.addListener((msg) => {
 });
 
 (async () => {
-  await refreshTier();
-  const tabId = await getActiveTabId();
-  if (tabId === undefined) {
-    statusEl.textContent = 'No active tab.';
-    return;
+  try {
+    await refreshTier();
+    const tabId = await getActiveTabId();
+    if (tabId === undefined) {
+      statusEl.textContent = 'No active tab.';
+      return;
+    }
+    const res = await chrome.runtime.sendMessage({ type: 'list', tabId });
+    allItems = res?.items || [];
+    render();
+  } catch (err) {
+    showError(`Startup failed: ${err?.message || err}\n${err?.stack || ''}`);
   }
-  const res = await chrome.runtime.sendMessage({ type: 'list', tabId });
-  allItems = res?.items || [];
-  render();
 })();
