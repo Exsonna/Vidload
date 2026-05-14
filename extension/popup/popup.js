@@ -1,9 +1,17 @@
 const listEl = document.getElementById('list');
 const statusEl = document.getElementById('status');
 const tpl = document.getElementById('row-template');
+const toggleEl = document.getElementById('toggle-hidden');
 
-// jobId -> { btn, kind }
+// Minimum byte size for a direct/network item to be considered "real video".
+// Anything smaller is almost always a probe response, adaptive sub-segment,
+// or otherwise not a user-facing video. Items with metadata (poster, dimensions,
+// duration, description) or non-direct kinds bypass this filter.
+const MIN_DIRECT_BYTES = 100 * 1024;
+
 const activeJobs = new Map();
+let allItems = [];
+let showHidden = false;
 
 async function getActiveTabId() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -33,40 +41,90 @@ function formatDuration(s) {
   return `${m}:${String(sec).padStart(2, '0')}`;
 }
 
+function qualityLabel(width, height) {
+  if (!height || !Number.isFinite(height)) return null;
+  if (height >= 2160) return '4K';
+  if (height >= 1440) return '1440p';
+  if (height >= 1080) return '1080p';
+  if (height >= 720) return '720p';
+  if (height >= 480) return '480p';
+  if (height >= 360) return '360p';
+  return `${height}p`;
+}
+
 function hostFromUrl(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
+}
+
+function looksLikeGibberish(s) {
+  if (!s) return true;
+  const cleaned = s.replace(/\.\w{1,5}$/, '').replace(/[-_]/g, '');
+  if (cleaned.length < 12) return false;
+  // High-entropy alphanumeric strings with no spaces = encrypted CDN paths
+  return /^[A-Za-z0-9+/=]+$/.test(cleaned) && cleaned.length >= 16;
+}
+
+function hasMetadata(item) {
+  return !!(item.poster || item.description || item.duration || (item.width && item.height));
+}
+
+function isFilteredOut(item) {
+  if (item.kind !== 'direct') return false; // HLS/DASH playlists pass
+  if (item.source !== 'network') return false; // Adapter/DOM items pass
+  if (hasMetadata(item)) return false;
+  if (item.bytes != null && item.bytes < MIN_DIRECT_BYTES) return true;
+  return false;
 }
 
 function chooseTitle(item) {
   if (item.description) return item.description;
   if (item.pageTitle && item.source !== 'network') return item.pageTitle;
+  if (looksLikeGibberish(item.label)) {
+    const host = hostFromUrl(item.url);
+    return host ? `Video on ${host}` : `${item.kind.toUpperCase()} stream`;
+  }
   return item.label;
 }
 
 function chooseSub(item) {
   const parts = [];
-  if (item.width && item.height) parts.push(`${item.width}×${item.height}`);
+  const q = qualityLabel(item.width, item.height);
+  if (q) parts.push(q);
+  if (item.width && item.height && !q) parts.push(`${item.width}×${item.height}`);
   const dur = formatDuration(item.duration);
   if (dur) parts.push(dur);
   const size = formatBytes(item.bytes);
   if (size) parts.push(size);
   if (item.source && item.source !== 'dom' && item.source !== 'network') {
     parts.push(item.source);
-  } else if (item.source === 'network') {
-    parts.push('network');
   }
   return parts.join(' · ');
 }
 
-function render(items) {
+function render() {
+  const visible = showHidden ? allItems : allItems.filter((it) => !isFilteredOut(it));
+  const hiddenCount = allItems.length - (showHidden ? allItems.length : visible.length);
+
   listEl.replaceChildren();
-  if (!items || items.length === 0) {
-    statusEl.textContent =
-      'No videos detected on this page yet. Try scrolling or hitting play.';
+  if (allItems.length === 0) {
+    statusEl.textContent = 'No videos detected on this page yet. Try scrolling or hitting play.';
+    toggleEl.hidden = true;
     return;
   }
-  statusEl.textContent = `${items.length} video${items.length === 1 ? '' : 's'} detected.`;
-  items.forEach((item) => {
+  if (visible.length === 0) {
+    statusEl.textContent = `${allItems.length} item${allItems.length === 1 ? '' : 's'} detected — all filtered as probes/segments.`;
+  } else if (hiddenCount > 0) {
+    statusEl.textContent = `${visible.length} video${visible.length === 1 ? '' : 's'} · ${hiddenCount} small item${hiddenCount === 1 ? '' : 's'} hidden.`;
+  } else {
+    statusEl.textContent = `${visible.length} video${visible.length === 1 ? '' : 's'} detected.`;
+  }
+
+  toggleEl.hidden = hiddenCount === 0 && !showHidden;
+  toggleEl.textContent = showHidden
+    ? `Hide small items (${allItems.length - allItems.filter((it) => !isFilteredOut(it)).length})`
+    : `Show ${hiddenCount} hidden small item${hiddenCount === 1 ? '' : 's'}`;
+
+  visible.forEach((item) => {
     const node = tpl.content.firstElementChild.cloneNode(true);
 
     node.querySelector('.title').textContent = chooseTitle(item);
@@ -80,6 +138,9 @@ function render(items) {
     } else {
       thumbImg.classList.add('broken');
     }
+
+    const q = qualityLabel(item.width, item.height);
+    node.querySelector('.thumb-quality').textContent = q || '';
     node.querySelector('.thumb-kind').textContent = item.kind;
 
     const btn = node.querySelector('.dl');
@@ -87,6 +148,11 @@ function render(items) {
     listEl.appendChild(node);
   });
 }
+
+toggleEl.addEventListener('click', () => {
+  showHidden = !showHidden;
+  render();
+});
 
 async function startDownload(item, btn) {
   setButton(btn, 'Saving…', { disabled: true });
@@ -142,5 +208,6 @@ chrome.runtime.onMessage.addListener((msg) => {
     return;
   }
   const res = await chrome.runtime.sendMessage({ type: 'list', tabId });
-  render(res?.items || []);
+  allItems = res?.items || [];
+  render();
 })();

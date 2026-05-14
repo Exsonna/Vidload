@@ -11,10 +11,17 @@
       <p id="status">Scanning…</p>
     </header>
     <ul id="list"></ul>
+    <footer>
+      <button id="toggle-hidden" type="button" hidden></button>
+    </footer>
     <template id="row-template">
       <li class="row">
         <div class="thumb">
           <img class="thumb-img" alt="" />
+          <svg class="thumb-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M8 5v14l11-7z" />
+          </svg>
+          <span class="thumb-quality"></span>
           <span class="thumb-kind"></span>
         </div>
         <div class="meta">
