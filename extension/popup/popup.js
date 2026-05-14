@@ -90,12 +90,13 @@ function isFilteredOut(item) {
   return false;
 }
 
+const VIDEO_EXT_RE = /\.(mp4|m4s|m4v|m4a|mov|webm|ts|mkv|avi)(?:$|\?)/i;
+
 function formatFromKind(item) {
   if (item.kind === 'hls') return 'HLS';
   if (item.kind === 'dash') return 'MPD';
   try {
-    const path = new URL(item.url).pathname;
-    const m = path.match(/\.(mp4|webm|mov|m4v|m4a|ts)(?:$|\?)/i);
+    const m = new URL(item.url).pathname.match(VIDEO_EXT_RE);
     if (m) return m[1].toUpperCase();
   } catch {}
   return 'MP4';
@@ -112,7 +113,7 @@ function sanitizeFilename(s) {
 function extensionForItem(item) {
   if (item.kind === 'hls' || item.kind === 'dash') return '';
   try {
-    const m = new URL(item.url).pathname.match(/\.(\w{2,4})(?:$|\?)/);
+    const m = new URL(item.url).pathname.match(VIDEO_EXT_RE);
     if (m) return '.' + m[1].toLowerCase();
   } catch {}
   return '.mp4';
@@ -190,6 +191,77 @@ async function copyUrl(item, btn) {
   } catch (e) {
     console.error('VidLoad: clipboard write failed', e);
   }
+}
+
+// HLS/DASH manifests don't carry duration in their HTTP headers, so the
+// service worker can't know it from webRequest observation alone. When the
+// popup renders an item without duration, we lazily fetch the manifest and
+// compute it. Cached on the item via _probed so repeated renders don't refetch.
+async function probeStreamDuration(item) {
+  try {
+    const res = await fetch(item.url, { credentials: 'include' });
+    if (!res.ok) return null;
+    const text = await res.text();
+    if (item.kind === 'hls') return await computeHlsDuration(text, item.url);
+    if (item.kind === 'dash') return computeDashDuration(text);
+  } catch (err) {
+    console.debug('VidLoad: duration probe failed for', item.url, err.message);
+  }
+  return null;
+}
+
+async function computeHlsDuration(text, baseUrl) {
+  // If master playlist, fetch the first variant.
+  if (text.includes('#EXT-X-STREAM-INF')) {
+    const lines = text.split(/\r?\n/);
+    let variantUrl = null;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].startsWith('#EXT-X-STREAM-INF')) {
+        let j = i + 1;
+        while (j < lines.length && lines[j].trim().startsWith('#')) j++;
+        const next = lines[j]?.trim();
+        if (next) {
+          variantUrl = new URL(next, baseUrl).href;
+          break;
+        }
+      }
+    }
+    if (!variantUrl) return null;
+    const res = await fetch(variantUrl, { credentials: 'include' });
+    if (!res.ok) return null;
+    text = await res.text();
+  }
+  let total = 0;
+  for (const line of text.split(/\r?\n/)) {
+    const m = line.match(/^#EXTINF:([\d.]+)/);
+    if (m) total += parseFloat(m[1]);
+  }
+  return total > 0 ? Math.round(total) : null;
+}
+
+function computeDashDuration(mpdText) {
+  const m = mpdText.match(/mediaPresentationDuration="([^"]+)"/);
+  if (!m) return null;
+  const dur = m[1].match(/^P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?$/);
+  if (!dur) return null;
+  const seconds =
+    parseFloat(dur[1] || 0) * 86400 +
+    parseFloat(dur[2] || 0) * 3600 +
+    parseFloat(dur[3] || 0) * 60 +
+    parseFloat(dur[4] || 0);
+  return seconds > 0 ? Math.round(seconds) : null;
+}
+
+function maybeProbeDuration(item, durEl) {
+  if (item.duration || item._probed) return;
+  if (item.kind !== 'hls' && item.kind !== 'dash') return;
+  item._probed = true;
+  probeStreamDuration(item).then((duration) => {
+    if (!duration) return;
+    item.duration = duration;
+    // Only update if the element is still in the DOM (popup might have closed).
+    if (durEl.isConnected) durEl.textContent = formatDuration(duration);
+  });
 }
 
 function renderTier(status) {
@@ -277,7 +349,9 @@ function render() {
     formatBadge.classList.add(item.kind);
 
     node.querySelector('.thumb-quality').textContent = qualityLabel(item.width, item.height) || '';
-    node.querySelector('.thumb-duration').textContent = formatDuration(item.duration) || '';
+    const durEl = node.querySelector('.thumb-duration');
+    durEl.textContent = formatDuration(item.duration) || '';
+    maybeProbeDuration(item, durEl);
     node.querySelector('.thumb-kind').textContent = item.kind;
 
     const sizeStr = formatBytes(item.bytes);
