@@ -1,3 +1,42 @@
+// =============================================================================
+// Error surface — registered BEFORE any DOM access so even module-load
+// failures show up as a red banner instead of dying silently.
+// =============================================================================
+function showError(message) {
+  console.error('[VidLoad popup]', message);
+  try {
+    let banner = document.getElementById('vidload-error-banner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'vidload-error-banner';
+      banner.style.cssText =
+        'background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;border-radius:6px;' +
+        'margin:8px;padding:8px 10px;font-size:11px;font-family:ui-monospace,Menlo,Consolas,monospace;' +
+        'white-space:pre-wrap;word-break:break-word;max-height:200px;overflow:auto;';
+      document.body.insertBefore(banner, document.body.firstChild);
+    }
+    banner.textContent = String(message);
+  } catch (e) {
+    /* document not ready yet, console is our fallback */
+  }
+}
+window.addEventListener('error', (ev) => {
+  showError(
+    `Uncaught: ${ev.message}\n` +
+    `${ev.filename}:${ev.lineno}:${ev.colno}\n` +
+    (ev.error?.stack || '')
+  );
+});
+window.addEventListener('unhandledrejection', (ev) => {
+  showError(
+    `Unhandled rejection: ${ev.reason?.message || ev.reason}\n` +
+    (ev.reason?.stack || '')
+  );
+});
+
+// =============================================================================
+// DOM references (returns null if missing — every use below is null-guarded)
+// =============================================================================
 const listEl = document.getElementById('list');
 const statusEl = document.getElementById('status');
 const tierBadgeEl = document.getElementById('tier-badge');
@@ -10,30 +49,13 @@ const paywallFootEl = document.getElementById('paywall-foot');
 const upgradeBtn = document.getElementById('upgrade-btn');
 const paywallBackBtn = document.getElementById('paywall-back');
 const footerEl = document.querySelector('footer');
-const headerEl = document.querySelector('header');
 
-// Global error surfacer — drops a red banner above the list with the message
-// and stack head, so we can see uncaught failures without opening the popup's
-// DevTools. Hidden until an error fires.
-function showError(message) {
-  let banner = document.getElementById('vidload-error-banner');
-  if (!banner) {
-    banner = document.createElement('div');
-    banner.id = 'vidload-error-banner';
-    banner.style.cssText =
-      'background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;border-radius:6px;' +
-      'margin:8px;padding:8px 10px;font-size:11px;font-family:ui-monospace,Menlo,Consolas,monospace;' +
-      'white-space:pre-wrap;word-break:break-word;';
-    document.body.insertBefore(banner, document.body.firstChild);
-  }
-  banner.textContent = String(message);
+// Surface missing elements early so we know what's wrong.
+{
+  const required = { listEl, statusEl, tpl };
+  const missing = Object.entries(required).filter(([_, v]) => !v).map(([k]) => k);
+  if (missing.length) showError(`Missing DOM element(s) in popup.html: ${missing.join(', ')}`);
 }
-window.addEventListener('error', (ev) => {
-  showError(`Uncaught: ${ev.message}\n${ev.filename}:${ev.lineno}:${ev.colno}`);
-});
-window.addEventListener('unhandledrejection', (ev) => {
-  showError(`Unhandled rejection: ${ev.reason?.message || ev.reason}`);
-});
 
 const MIN_DIRECT_BYTES = 100 * 1024;
 
@@ -49,7 +71,9 @@ async function getActiveTabId() {
 }
 
 function setDownloadButton(btn, text, opts = {}) {
-  btn.querySelector('.dl-label').textContent = text;
+  if (!btn) return;
+  const label = btn.querySelector('.dl-label');
+  if (label) label.textContent = text;
   btn.disabled = !!opts.disabled;
 }
 
@@ -102,10 +126,11 @@ function looksLikeGibberish(s) {
 }
 
 function hasMetadata(item) {
-  return !!(item.poster || item.description || item.duration || (item.width && item.height));
+  return !!(item?.poster || item?.description || item?.duration || (item?.width && item?.height));
 }
 
 function isFilteredOut(item) {
+  if (!item) return true;
   if (item.kind !== 'direct') return false;
   if (item.source !== 'network') return false;
   if (hasMetadata(item)) return false;
@@ -116,6 +141,7 @@ function isFilteredOut(item) {
 const VIDEO_EXT_RE = /\.(mp4|m4s|m4v|m4a|mov|webm|ts|mkv|avi)(?:$|\?)/i;
 
 function formatFromKind(item) {
+  if (!item) return 'MP4';
   if (item.kind === 'hls') return 'HLS';
   if (item.kind === 'dash') return 'MPD';
   try {
@@ -134,6 +160,7 @@ function sanitizeFilename(s) {
 }
 
 function extensionForItem(item) {
+  if (!item) return '.mp4';
   if (item.kind === 'hls' || item.kind === 'dash') return '';
   try {
     const m = new URL(item.url).pathname.match(VIDEO_EXT_RE);
@@ -143,18 +170,20 @@ function extensionForItem(item) {
 }
 
 function chooseTitle(item) {
+  if (!item) return 'Unknown';
   if (item.userLabel) return item.userLabel;
   if (item.contextLabel) return item.contextLabel;
   if (item.description) return item.description;
   if (item.pageTitle && item.source !== 'network') return item.pageTitle;
   if (looksLikeGibberish(item.label)) {
     const host = shortHost(item.url);
-    return host ? `Video on ${host}` : `${item.kind.toUpperCase()} stream`;
+    return host ? `Video on ${host}` : `${(item.kind || 'video').toUpperCase()} stream`;
   }
-  return item.label;
+  return item.label || 'Video';
 }
 
 function chooseFilename(item) {
+  if (!item) return `vidload-${Date.now()}.mp4`;
   if (item.userLabel) return ensureExtension(sanitizeFilename(item.userLabel), item);
   let base;
   if (item.contextLabel) base = item.contextLabel;
@@ -174,13 +203,16 @@ function ensureExtension(base, item) {
 }
 
 function makeTitleEditable(titleEl, item) {
+  if (!titleEl) return;
   titleEl.contentEditable = 'true';
   titleEl.focus();
-  const range = document.createRange();
-  range.selectNodeContents(titleEl);
-  const sel = window.getSelection();
-  sel.removeAllRanges();
-  sel.addRange(range);
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(titleEl);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  } catch {}
 
   const finish = (commit) => {
     titleEl.contentEditable = 'false';
@@ -209,17 +241,13 @@ function makeTitleEditable(titleEl, item) {
 async function copyUrl(item, btn) {
   try {
     await navigator.clipboard.writeText(item.url);
-    btn.classList.add('copied');
-    setTimeout(() => btn.classList.remove('copied'), 1200);
+    btn?.classList.add('copied');
+    setTimeout(() => btn?.classList.remove('copied'), 1200);
   } catch (e) {
     console.error('VidLoad: clipboard write failed', e);
   }
 }
 
-// HLS/DASH manifests don't carry duration in their HTTP headers, so the
-// service worker can't know it from webRequest observation alone. When the
-// popup renders an item without duration, we lazily fetch the manifest and
-// compute it. Cached on the item via _probed so repeated renders don't refetch.
 async function probeStreamDuration(item) {
   try {
     const res = await fetch(item.url, { credentials: 'include' });
@@ -234,7 +262,6 @@ async function probeStreamDuration(item) {
 }
 
 async function computeHlsDuration(text, baseUrl) {
-  // If master playlist, fetch the first variant.
   if (text.includes('#EXT-X-STREAM-INF')) {
     const lines = text.split(/\r?\n/);
     let variantUrl = null;
@@ -276,24 +303,22 @@ function computeDashDuration(mpdText) {
 }
 
 function maybeProbeDuration(item, durEl) {
-  if (item.duration || item._probed) return;
+  if (!item || item.duration || item._probed) return;
   if (item.kind !== 'hls' && item.kind !== 'dash') return;
   item._probed = true;
   probeStreamDuration(item)
     .then((duration) => {
       if (!duration) return;
       item.duration = duration;
-      // Only update if the element is still in the DOM (popup might have closed).
       if (durEl && durEl.isConnected) durEl.textContent = formatDuration(duration);
     })
-    .catch((err) => {
-      console.debug('VidLoad: probe promise rejected', err?.message || err);
-    });
+    .catch((err) => console.debug('VidLoad: probe rejected', err?.message || err));
 }
 
 function renderTier(status) {
-  tierStatus = status;
-  if (!status.monetizationEnabled) {
+  if (!tierBadgeEl) return;
+  tierStatus = status || tierStatus;
+  if (!status?.monetizationEnabled) {
     tierBadgeEl.hidden = true;
     return;
   }
@@ -308,98 +333,128 @@ function renderTier(status) {
 }
 
 function showPaywall(detail) {
+  if (!paywallEl) return;
   paywallEl.hidden = false;
-  listEl.hidden = true;
-  footerEl.hidden = true;
-  if (detail) {
+  if (listEl) listEl.hidden = true;
+  if (footerEl) footerEl.hidden = true;
+  if (detail && paywallDetailEl) {
     paywallDetailEl.textContent = `You've used ${detail.used} of ${detail.limit} free downloads today.`;
-    if (detail.priceLabel) paywallPriceEl.textContent = detail.priceLabel.replace(/\s+one-time.*$/i, '') || '$4.99';
   }
-  paywallFootEl.textContent = tierStatus.monetizationEnabled
-    ? 'Counter resets at midnight local time.'
-    : 'Monetization is disabled in this build — this is a preview of the paywall UI.';
+  if (detail?.priceLabel && paywallPriceEl) {
+    paywallPriceEl.textContent = detail.priceLabel.replace(/\s+one-time.*$/i, '') || '$4.99';
+  }
+  if (paywallFootEl) {
+    paywallFootEl.textContent = tierStatus?.monetizationEnabled
+      ? 'Counter resets at midnight local time.'
+      : 'Monetization is disabled in this build — this is a preview of the paywall UI.';
+  }
 }
 
 function hidePaywall() {
-  paywallEl.hidden = true;
-  listEl.hidden = false;
-  footerEl.hidden = false;
+  if (paywallEl) paywallEl.hidden = true;
+  if (listEl) listEl.hidden = false;
+  if (footerEl) footerEl.hidden = false;
 }
 
-upgradeBtn.addEventListener('click', async () => {
-  const res = await chrome.runtime.sendMessage({ type: 'open-payment-page' });
-  if (!res?.ok) {
-    paywallFootEl.textContent = res?.error || 'Could not open payment page.';
-    return;
+upgradeBtn?.addEventListener('click', async () => {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'open-payment-page' });
+    if (!res?.ok) {
+      if (paywallFootEl) paywallFootEl.textContent = res?.error || 'Could not open payment page.';
+      return;
+    }
+    window.close();
+  } catch (err) {
+    showError(`Upgrade click failed: ${err?.message || err}`);
   }
-  window.close();
 });
 
-paywallBackBtn.addEventListener('click', () => hidePaywall());
+paywallBackBtn?.addEventListener('click', () => hidePaywall());
 
 function render() {
-  const filtered = allItems.filter((it) => !dismissed.has(it.url));
-  const visible = showHidden ? filtered : filtered.filter((it) => !isFilteredOut(it));
-  const hiddenCount = filtered.length - visible.length;
-
-  listEl.replaceChildren();
-  if (allItems.length === 0) {
-    statusEl.textContent = 'No videos detected on this page yet. Try scrolling or hitting play.';
-    toggleEl.hidden = true;
+  if (!listEl || !statusEl) {
+    showError('Cannot render — list or status element missing.');
     return;
   }
-  if (filtered.length === 0) {
-    statusEl.textContent = 'All items dismissed.';
-    toggleEl.hidden = true;
-    return;
-  }
-  if (visible.length === 0) {
-    statusEl.textContent = `${filtered.length} item${filtered.length === 1 ? '' : 's'} detected — all filtered as probes/segments.`;
-  } else if (hiddenCount > 0) {
-    statusEl.textContent = `${visible.length} video${visible.length === 1 ? '' : 's'} · ${hiddenCount} small item${hiddenCount === 1 ? '' : 's'} hidden.`;
-  } else {
-    statusEl.textContent = `${visible.length} video${visible.length === 1 ? '' : 's'} detected.`;
-  }
+  try {
+    const filtered = allItems.filter((it) => it && !dismissed.has(it.url));
+    const visible = showHidden ? filtered : filtered.filter((it) => !isFilteredOut(it));
+    const hiddenCount = filtered.length - visible.length;
 
-  toggleEl.hidden = hiddenCount === 0 && !showHidden;
-  toggleEl.textContent = showHidden
-    ? 'Hide small probe items'
-    : `Show ${hiddenCount} hidden small item${hiddenCount === 1 ? '' : 's'}`;
-
-  visible.forEach((item) => {
-    try { renderRow(item); } catch (err) {
-      console.error('VidLoad: row render failed', item, err);
-      showError(`Row render failed: ${err?.message || err}`);
+    listEl.replaceChildren();
+    if (allItems.length === 0) {
+      statusEl.textContent = 'No videos detected on this page yet. Try scrolling or hitting play.';
+      if (toggleEl) toggleEl.hidden = true;
+      return;
     }
-  });
+    if (filtered.length === 0) {
+      statusEl.textContent = 'All items dismissed.';
+      if (toggleEl) toggleEl.hidden = true;
+      return;
+    }
+    if (visible.length === 0) {
+      statusEl.textContent = `${filtered.length} item${filtered.length === 1 ? '' : 's'} detected — all filtered as probes/segments.`;
+    } else if (hiddenCount > 0) {
+      statusEl.textContent = `${visible.length} video${visible.length === 1 ? '' : 's'} · ${hiddenCount} small item${hiddenCount === 1 ? '' : 's'} hidden.`;
+    } else {
+      statusEl.textContent = `${visible.length} video${visible.length === 1 ? '' : 's'} detected.`;
+    }
+
+    if (toggleEl) {
+      toggleEl.hidden = hiddenCount === 0 && !showHidden;
+      toggleEl.textContent = showHidden
+        ? 'Hide small probe items'
+        : `Show ${hiddenCount} hidden small item${hiddenCount === 1 ? '' : 's'}`;
+    }
+
+    visible.forEach((item) => {
+      try { renderRow(item); } catch (err) {
+        console.error('VidLoad: row render failed for', item, err);
+        showError(`Row render failed: ${err?.message || err}\n${err?.stack || ''}`);
+      }
+    });
+  } catch (err) {
+    showError(`Render failed: ${err?.message || err}\n${err?.stack || ''}`);
+  }
 }
 
 function renderRow(item) {
-    const node = tpl.content.firstElementChild.cloneNode(true);
-    const titleEl = node.querySelector('.title');
-    titleEl.textContent = chooseTitle(item);
+  if (!tpl || !listEl) return;
+  const node = tpl.content.firstElementChild?.cloneNode(true);
+  if (!node) return;
 
-    const formatBadge = node.querySelector('.format-badge');
+  const titleEl = node.querySelector('.title');
+  if (titleEl) titleEl.textContent = chooseTitle(item);
+
+  const formatBadge = node.querySelector('.format-badge');
+  if (formatBadge) {
     formatBadge.textContent = formatFromKind(item);
-    formatBadge.classList.add(item.kind);
+    if (item.kind) formatBadge.classList.add(item.kind);
+  }
 
-    node.querySelector('.thumb-quality').textContent = qualityLabel(item.width, item.height) || '';
-    const durEl = node.querySelector('.thumb-duration');
+  const quality = node.querySelector('.thumb-quality');
+  if (quality) quality.textContent = qualityLabel(item.width, item.height) || '';
+
+  const durEl = node.querySelector('.thumb-duration');
+  if (durEl) {
     durEl.textContent = formatDuration(item.duration) || '';
     maybeProbeDuration(item, durEl);
-    node.querySelector('.thumb-kind').textContent = item.kind;
+  }
 
-    // Tiny "bytes" on HLS/DASH items is the manifest text size, not the video
-    // size. The actual video is the sum of all segments, which we don't know
-    // until the offscreen engine downloads them. Hide that misleading number.
-    const sizePill = node.querySelector('.size-pill');
+  const kindEl = node.querySelector('.thumb-kind');
+  if (kindEl) kindEl.textContent = item.kind || '';
+
+  const sizePill = node.querySelector('.size-pill');
+  if (sizePill) {
     const isManifestSize = (item.kind === 'hls' || item.kind === 'dash') &&
       item.bytes != null && item.bytes < 50 * 1024;
     const sizeStr = isManifestSize ? null : formatBytes(item.bytes);
     if (sizeStr) sizePill.textContent = sizeStr;
     else sizePill.remove();
+  }
 
-    const sourcePill = node.querySelector('.source-pill');
+  const sourcePill = node.querySelector('.source-pill');
+  if (sourcePill) {
     const sourceText = item.source && item.source !== 'dom' && item.source !== 'network'
       ? item.source
       : shortHost(item.url);
@@ -409,52 +464,81 @@ function renderRow(item) {
     } else {
       sourcePill.remove();
     }
+  }
 
-    const thumbImg = node.querySelector('.thumb-img');
+  const thumbImg = node.querySelector('.thumb-img');
+  if (thumbImg) {
     if (item.poster) {
       thumbImg.src = item.poster;
       thumbImg.addEventListener('error', () => thumbImg.classList.add('broken'), { once: true });
     } else {
       thumbImg.classList.add('broken');
     }
+  }
 
-    node.querySelector('.edit-btn').addEventListener('click', (e) => {
-      e.stopPropagation();
-      makeTitleEditable(titleEl, item);
-    });
+  node.querySelector('.edit-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (titleEl) makeTitleEditable(titleEl, item);
+  });
 
-    node.querySelector('.dismiss').addEventListener('click', () => {
-      dismissed.add(item.url);
-      render();
-    });
+  node.querySelector('.dismiss')?.addEventListener('click', () => {
+    dismissed.add(item.url);
+    render();
+  });
 
-    const moreBtn = node.querySelector('.more');
-    moreBtn.addEventListener('click', () => copyUrl(item, moreBtn));
+  const moreBtn = node.querySelector('.more');
+  moreBtn?.addEventListener('click', () => copyUrl(item, moreBtn));
 
-    const dlBtn = node.querySelector('.dl');
-    dlBtn.addEventListener('click', () => startDownload(item, dlBtn));
+  const dlBtn = node.querySelector('.dl');
+  dlBtn?.addEventListener('click', () => startDownload(item, dlBtn));
 
-    listEl.appendChild(node);
+  listEl.appendChild(node);
 }
 
-toggleEl.addEventListener('click', () => {
+toggleEl?.addEventListener('click', () => {
   showHidden = !showHidden;
   render();
 });
 
 async function refreshTier() {
-  const status = await chrome.runtime.sendMessage({ type: 'get-status' });
-  if (status) renderTier(status);
-  return status;
+  try {
+    const status = await chrome.runtime.sendMessage({ type: 'get-status' });
+    if (status) renderTier(status);
+    return status;
+  } catch (err) {
+    console.debug('VidLoad: get-status failed', err?.message || err);
+    return null;
+  }
 }
 
 async function startDownload(item, btn) {
   setDownloadButton(btn, 'Saving…', { disabled: true });
   const filename = chooseFilename(item);
-  if (item.kind === 'hls' || item.kind === 'dash') {
+  try {
+    if (item.kind === 'hls' || item.kind === 'dash') {
+      const res = await chrome.runtime.sendMessage({
+        type: 'download-stream',
+        format: item.kind,
+        url: item.url,
+        filename,
+      });
+      if (res?.error === 'paywall') {
+        setDownloadButton(btn, 'Download');
+        showPaywall(res);
+        return;
+      }
+      if (!res?.ok) {
+        setDownloadButton(btn, 'Retry');
+        if (btn) btn.title = `Download failed: ${res?.error || 'unknown error'}`;
+        console.error('VidLoad stream start failed:', res?.error);
+        return;
+      }
+      activeJobs.set(res.jobId, { btn });
+      refreshTier();
+      return;
+    }
     const res = await chrome.runtime.sendMessage({
-      type: 'download-stream',
-      format: item.kind,
+      type: 'download',
       url: item.url,
       filename,
     });
@@ -463,33 +547,19 @@ async function startDownload(item, btn) {
       showPaywall(res);
       return;
     }
-    if (!res?.ok) {
+    if (res?.ok) {
+      setDownloadButton(btn, 'Saved', { disabled: true });
+      if (btn) btn.title = '';
+      refreshTier();
+    } else {
       setDownloadButton(btn, 'Retry');
-      console.error('VidLoad stream start failed:', res?.error);
-      return;
+      if (btn) btn.title = `Download failed: ${res?.error || 'unknown error'}`;
+      console.error('VidLoad download failed:', res?.error);
     }
-    activeJobs.set(res.jobId, { btn });
-    refreshTier();
-    return;
-  }
-  const res = await chrome.runtime.sendMessage({
-    type: 'download',
-    url: item.url,
-    filename,
-  });
-  if (res?.error === 'paywall') {
-    setDownloadButton(btn, 'Download');
-    showPaywall(res);
-    return;
-  }
-  if (res?.ok) {
-    setDownloadButton(btn, 'Saved', { disabled: true });
-    btn.title = '';
-    refreshTier();
-  } else {
+  } catch (err) {
     setDownloadButton(btn, 'Retry');
-    btn.title = `Download failed: ${res?.error || 'unknown error'}`;
-    console.error('VidLoad download failed:', res?.error);
+    if (btn) btn.title = `Download failed: ${err?.message || err}`;
+    showError(`Download click failed: ${err?.message || err}`);
   }
 }
 
@@ -500,14 +570,14 @@ chrome.runtime.onMessage.addListener((msg) => {
     if (msg.phase === 'manifest') setDownloadButton(btn, 'Reading…', { disabled: true });
     else if (msg.phase === 'save') setDownloadButton(btn, 'Finalizing…', { disabled: true });
     else setDownloadButton(btn, `${msg.current}/${msg.total}`, { disabled: true });
-    btn.title = '';
+    if (btn) btn.title = '';
   } else if (msg.type === 'stream-done') {
     setDownloadButton(btn, 'Saved', { disabled: true });
-    btn.title = '';
+    if (btn) btn.title = '';
     activeJobs.delete(msg.jobId);
   } else if (msg.type === 'stream-error') {
     setDownloadButton(btn, 'Retry');
-    btn.title = `Download failed: ${msg.error || 'unknown error'}`;
+    if (btn) btn.title = `Download failed: ${msg.error || 'unknown error'}`;
     console.error('VidLoad stream error:', msg.error);
     activeJobs.delete(msg.jobId);
   }
@@ -518,7 +588,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     await refreshTier();
     const tabId = await getActiveTabId();
     if (tabId === undefined) {
-      statusEl.textContent = 'No active tab.';
+      if (statusEl) statusEl.textContent = 'No active tab.';
       return;
     }
     const res = await chrome.runtime.sendMessage({ type: 'list', tabId });
