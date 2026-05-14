@@ -248,69 +248,124 @@ async function copyUrl(item, btn) {
   }
 }
 
-async function probeStreamDuration(item) {
+// Probe HLS/DASH manifests for duration + bandwidth + resolution. We don't get
+// any of these from webRequest headers — the playlist content is the only
+// source. Results enrich the item: duration -> overlay, bandwidth*duration/8 ->
+// estimated size pill, resolution -> quality badge.
+async function probeStreamMetadata(item) {
   try {
     const res = await fetch(item.url, { credentials: 'include' });
     if (!res.ok) return null;
     const text = await res.text();
-    if (item.kind === 'hls') return await computeHlsDuration(text, item.url);
-    if (item.kind === 'dash') return computeDashDuration(text);
+    if (item.kind === 'hls') return await parseHlsMetadata(text, item.url);
+    if (item.kind === 'dash') return parseDashMetadata(text);
   } catch (err) {
-    console.debug('VidLoad: duration probe failed for', item?.url, err?.message || err);
+    console.debug('VidLoad: metadata probe failed for', item?.url, err?.message || err);
   }
   return null;
 }
 
-async function computeHlsDuration(text, baseUrl) {
+async function parseHlsMetadata(text, baseUrl) {
+  let bandwidth = null;
+  let width = null;
+  let height = null;
+
   if (text.includes('#EXT-X-STREAM-INF')) {
     const lines = text.split(/\r?\n/);
-    let variantUrl = null;
+    let bestBw = 0;
+    let bestUrl = null;
+    let bestW = null;
+    let bestH = null;
     for (let i = 0; i < lines.length; i++) {
-      if (lines[i].startsWith('#EXT-X-STREAM-INF')) {
-        let j = i + 1;
-        while (j < lines.length && lines[j].trim().startsWith('#')) j++;
-        const next = lines[j]?.trim();
-        if (next) {
-          variantUrl = new URL(next, baseUrl).href;
-          break;
+      if (!lines[i].startsWith('#EXT-X-STREAM-INF')) continue;
+      const bwMatch = lines[i].match(/BANDWIDTH=(\d+)/);
+      const resMatch = lines[i].match(/RESOLUTION=(\d+)x(\d+)/);
+      const bwVal = bwMatch ? parseInt(bwMatch[1], 10) : 0;
+      let j = i + 1;
+      while (j < lines.length && lines[j].trim().startsWith('#')) j++;
+      const next = lines[j]?.trim();
+      if (next && bwVal > bestBw) {
+        bestBw = bwVal;
+        bestUrl = new URL(next, baseUrl).href;
+        if (resMatch) {
+          bestW = parseInt(resMatch[1], 10);
+          bestH = parseInt(resMatch[2], 10);
         }
       }
     }
-    if (!variantUrl) return null;
-    const res = await fetch(variantUrl, { credentials: 'include' });
-    if (!res.ok) return null;
+    if (!bestUrl) return null;
+    bandwidth = bestBw;
+    width = bestW;
+    height = bestH;
+    const res = await fetch(bestUrl, { credentials: 'include' });
+    if (!res.ok) return { duration: null, bandwidth, width, height };
     text = await res.text();
   }
+
   let total = 0;
   for (const line of text.split(/\r?\n/)) {
     const m = line.match(/^#EXTINF:([\d.]+)/);
     if (m) total += parseFloat(m[1]);
   }
-  return total > 0 ? Math.round(total) : null;
+  const duration = total > 0 ? Math.round(total) : null;
+  return { duration, bandwidth, width, height };
 }
 
-function computeDashDuration(mpdText) {
-  const m = mpdText.match(/mediaPresentationDuration="([^"]+)"/);
-  if (!m) return null;
-  const dur = m[1].match(/^P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?$/);
-  if (!dur) return null;
-  const seconds =
-    parseFloat(dur[1] || 0) * 86400 +
-    parseFloat(dur[2] || 0) * 3600 +
-    parseFloat(dur[3] || 0) * 60 +
-    parseFloat(dur[4] || 0);
-  return seconds > 0 ? Math.round(seconds) : null;
+function parseDashMetadata(mpdText) {
+  let duration = null;
+  const dm = mpdText.match(/mediaPresentationDuration="([^"]+)"/);
+  if (dm) {
+    const d = dm[1].match(/^P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?$/);
+    if (d) {
+      const seconds =
+        parseFloat(d[1] || 0) * 86400 +
+        parseFloat(d[2] || 0) * 3600 +
+        parseFloat(d[3] || 0) * 60 +
+        parseFloat(d[4] || 0);
+      if (seconds > 0) duration = Math.round(seconds);
+    }
+  }
+
+  let bandwidth = 0;
+  let width = null;
+  let height = null;
+  const reps = mpdText.match(/<Representation[^>]*>/gi) || [];
+  for (const rep of reps) {
+    const bw = parseInt(rep.match(/bandwidth="(\d+)"/i)?.[1] || '0', 10);
+    if (bw <= bandwidth) continue;
+    bandwidth = bw;
+    const w = parseInt(rep.match(/width="(\d+)"/i)?.[1] || '0', 10);
+    const h = parseInt(rep.match(/height="(\d+)"/i)?.[1] || '0', 10);
+    width = w || null;
+    height = h || null;
+  }
+  return { duration, bandwidth: bandwidth || null, width, height };
 }
 
-function maybeProbeDuration(item, durEl) {
-  if (!item || item.duration || item._probed) return;
+function maybeProbeMetadata(item, refs) {
+  if (!item || item._probed) return;
   if (item.kind !== 'hls' && item.kind !== 'dash') return;
   item._probed = true;
-  probeStreamDuration(item)
-    .then((duration) => {
-      if (!duration) return;
-      item.duration = duration;
-      if (durEl && durEl.isConnected) durEl.textContent = formatDuration(duration);
+  probeStreamMetadata(item)
+    .then((meta) => {
+      if (!meta) return;
+      if (meta.duration && !item.duration) {
+        item.duration = meta.duration;
+        if (refs.durEl?.isConnected) refs.durEl.textContent = formatDuration(meta.duration);
+      }
+      if (meta.width && meta.height && !item.width) {
+        item.width = meta.width;
+        item.height = meta.height;
+        const q = qualityLabel(meta.width, meta.height);
+        if (q && refs.qualityEl?.isConnected) refs.qualityEl.textContent = q;
+      }
+      if (meta.bandwidth && (meta.duration || item.duration)) {
+        const dur = meta.duration || item.duration;
+        item.estimatedBytes = Math.round((meta.bandwidth * dur) / 8);
+        if (refs.sizePill?.isConnected) {
+          refs.sizePill.textContent = '~' + formatBytes(item.estimatedBytes);
+        }
+      }
     })
     .catch((err) => console.debug('VidLoad: probe rejected', err?.message || err));
 }
@@ -436,22 +491,40 @@ function renderRow(item) {
   if (quality) quality.textContent = qualityLabel(item.width, item.height) || '';
 
   const durEl = node.querySelector('.thumb-duration');
-  if (durEl) {
-    durEl.textContent = formatDuration(item.duration) || '';
-    maybeProbeDuration(item, durEl);
-  }
+  if (durEl) durEl.textContent = formatDuration(item.duration) || '';
 
   const kindEl = node.querySelector('.thumb-kind');
   if (kindEl) kindEl.textContent = item.kind || '';
 
   const sizePill = node.querySelector('.size-pill');
+  let keepSizePill = false;
   if (sizePill) {
-    const isManifestSize = (item.kind === 'hls' || item.kind === 'dash') &&
-      item.bytes != null && item.bytes < 50 * 1024;
-    const sizeStr = isManifestSize ? null : formatBytes(item.bytes);
-    if (sizeStr) sizePill.textContent = sizeStr;
-    else sizePill.remove();
+    const isStream = item.kind === 'hls' || item.kind === 'dash';
+    if (item.estimatedBytes) {
+      sizePill.textContent = '~' + formatBytes(item.estimatedBytes);
+      keepSizePill = true;
+    } else if (isStream) {
+      // Manifest-size bytes are misleading; leave the pill empty and let
+      // maybeProbeMetadata fill it with the bandwidth*duration estimate.
+      sizePill.textContent = '';
+      keepSizePill = true;
+    } else {
+      const sizeStr = formatBytes(item.bytes);
+      if (sizeStr) {
+        sizePill.textContent = sizeStr;
+        keepSizePill = true;
+      }
+    }
+    if (!keepSizePill) sizePill.remove();
   }
+
+  // Kick off the manifest probe — fills in duration overlay, resolution
+  // badge, and estimated size pill as they resolve.
+  maybeProbeMetadata(item, {
+    durEl,
+    qualityEl: quality,
+    sizePill: keepSizePill ? sizePill : null,
+  });
 
   const sourcePill = node.querySelector('.source-pill');
   if (sourcePill) {
