@@ -53,6 +53,16 @@ function hostFromUrl(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
 }
 
+function shortHost(url) {
+  // Collapse long CDN hostnames like instagram.fhkg4-2.fna.fbcdn.net → fbcdn.net.
+  // For 2-segment hosts (instagram.com) returns as-is.
+  const h = hostFromUrl(url);
+  if (!h) return '';
+  const parts = h.split('.');
+  if (parts.length <= 2) return h;
+  return parts.slice(-2).join('.');
+}
+
 function looksLikeGibberish(s) {
   if (!s) return true;
   const cleaned = s.replace(/\.\w{1,5}$/, '').replace(/[-_]/g, '');
@@ -188,9 +198,13 @@ function render() {
     const sourcePill = node.querySelector('.source-pill');
     const sourceText = item.source && item.source !== 'dom' && item.source !== 'network'
       ? item.source
-      : hostFromUrl(item.url);
-    if (sourceText) sourcePill.textContent = sourceText;
-    else sourcePill.remove();
+      : shortHost(item.url);
+    if (sourceText) {
+      sourcePill.textContent = sourceText;
+      sourcePill.title = hostFromUrl(item.url);
+    } else {
+      sourcePill.remove();
+    }
 
     const thumbImg = node.querySelector('.thumb-img');
     if (item.poster) {

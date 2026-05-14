@@ -250,6 +250,14 @@ footer {
   border-radius: 4px;
   border: 1px solid #e5e7eb;
   white-space: nowrap;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.source-pill {
+  flex-shrink: 1;
+  min-width: 0;
 }
 
 .pill:empty { display: none; }
@@ -262,14 +270,15 @@ button.dl {
   color: #fff;
   border: 0;
   border-radius: 5px;
-  padding: 6px 12px;
+  padding: 6px 10px;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   letter-spacing: 0.2px;
+  margin-left: auto;
 }
 
 .dl-icon { width: 14px; height: 14px; fill: currentColor; }

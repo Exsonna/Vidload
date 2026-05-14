@@ -1,12 +1,32 @@
 // VidLoad background service worker (MV3)
 // - Receives <video> sightings from content scripts and site adapters
 // - Observes network responses with video/HLS/DASH Content-Type or URL pattern
-// - Captures Content-Length when present
+// - Captures Content-Length and Content-Range (total file size)
+// - Dedupes byte-range chunks of the same media into one canonical item
 // - Stores per-tab detected media in chrome.storage.session
 // - Routes direct downloads to chrome.downloads, segmented downloads to offscreen
 
 const STORAGE_KEY = (tabId) => `tab:${tabId}`;
 const OFFSCREEN_URL = 'offscreen/offscreen.html';
+
+// Query params that vary across byte-range requests for the same media.
+// Stripping them collapses many chunks into one canonical URL.
+const RANGE_NOISE_PARAMS = [
+  'bytestart', 'byteend',
+  'range',
+  'rn', 'rbuf',
+  'fs', 'fe',
+];
+
+function dedupKey(url) {
+  try {
+    const u = new URL(url);
+    for (const p of RANGE_NOISE_PARAMS) u.searchParams.delete(p);
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
 
 function classifyContentType(contentType) {
   if (!contentType) return null;
@@ -47,16 +67,27 @@ async function setTabItems(tabId, items) {
 
 async function upsertItem(tabId, item) {
   const items = await getTabItems(tabId);
-  const existing = items.find((it) => it.url === item.url);
+  const key = dedupKey(item.url);
+  const existing = items.find((it) => dedupKey(it.url) === key);
   if (existing) {
-    // Merge in any newly-known fields without overwriting existing values.
-    for (const k of ['poster', 'width', 'height', 'duration', 'bytes', 'pageTitle', 'description']) {
+    for (const k of ['poster', 'width', 'height', 'duration', 'pageTitle', 'description']) {
       if (existing[k] == null && item[k] != null) existing[k] = item[k];
     }
+    // Prefer the largest observed byte count (full-file size from Content-Range
+    // beats a single chunk's Content-Length).
+    if (item.bytes && (!existing.bytes || item.bytes > existing.bytes)) {
+      existing.bytes = item.bytes;
+    }
+    // Prefer an adapter-supplied source over the generic 'network' source.
+    if (existing.source === 'network' && item.source && item.source !== 'network') {
+      existing.source = item.source;
+    }
+    // Canonicalize URL to the no-range form once we've seen it.
+    existing.url = key;
     await setTabItems(tabId, items);
     return;
   }
-  items.push(item);
+  items.push({ ...item, url: key });
   if (items.length > 50) items.splice(0, items.length - 50);
   await setTabItems(tabId, items);
 }
@@ -154,21 +185,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return false;
 });
 
+function parseTotalBytes(headers) {
+  // Content-Range: bytes 0-1023/12345678  → 12345678 is the total file size
+  const cr = headers.find((h) => h.name.toLowerCase() === 'content-range');
+  if (cr?.value) {
+    const m = cr.value.match(/\/(\d+)\s*$/);
+    if (m) {
+      const total = parseInt(m[1], 10);
+      if (Number.isFinite(total) && total > 0) return total;
+    }
+  }
+  const cl = headers.find((h) => h.name.toLowerCase() === 'content-length');
+  if (cl?.value) {
+    const n = parseInt(cl.value, 10);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
     if (details.tabId < 0) return;
     const headers = details.responseHeaders || [];
     const ctHeader = headers.find((h) => h.name.toLowerCase() === 'content-type');
-    const clHeader = headers.find((h) => h.name.toLowerCase() === 'content-length');
     const kind = classifyContentType(ctHeader?.value) || classifyByUrl(details.url);
     if (!kind) return;
-    const bytes = clHeader?.value ? parseInt(clHeader.value, 10) : null;
     upsertItem(details.tabId, {
       source: 'network',
       url: details.url,
       label: guessFilename(details.url),
       kind,
-      bytes: Number.isFinite(bytes) && bytes > 0 ? bytes : null,
+      bytes: parseTotalBytes(headers),
       ts: Date.now(),
     });
   },
