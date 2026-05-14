@@ -70,7 +70,7 @@ async function upsertItem(tabId, item) {
   const key = dedupKey(item.url);
   const existing = items.find((it) => dedupKey(it.url) === key);
   if (existing) {
-    for (const k of ['poster', 'width', 'height', 'duration', 'pageTitle', 'description']) {
+    for (const k of ['poster', 'width', 'height', 'duration', 'pageTitle', 'description', 'contextLabel']) {
       if (existing[k] == null && item[k] != null) existing[k] = item[k];
     }
     // Prefer the largest observed byte count (full-file size from Content-Range
@@ -114,8 +114,21 @@ function makeJobId() {
   return `job-${Date.now()}-${jobCounter}`;
 }
 
+// Per-tab "active context label" — the on-page name (Instagram handle,
+// Twitter handle, heading) of the <video> currently closest to viewport
+// center. Updated by content-script scroll/mutation events. Used to
+// tag network-observed URLs (which arrive without a DOM tie) with a
+// meaningful filename.
+const activeContexts = new Map();
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.target && msg.target !== 'sw') return false;
+
+  if (msg?.type === 'active-context' && sender.tab?.id !== undefined) {
+    if (msg.label) activeContexts.set(sender.tab.id, msg.label);
+    else activeContexts.delete(sender.tab.id);
+    return false;
+  }
 
   if (msg?.type === 'media-found' && sender.tab?.id !== undefined) {
     const tabId = sender.tab.id;
@@ -132,6 +145,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           pageUrl: msg.pageUrl,
           pageTitle,
           description: it.description || null,
+          contextLabel: it.contextLabel || null,
           poster: it.poster || null,
           width: it.width || null,
           height: it.height || null,
@@ -216,6 +230,7 @@ chrome.webRequest.onHeadersReceived.addListener(
       label: guessFilename(details.url),
       kind,
       bytes: parseTotalBytes(headers),
+      contextLabel: activeContexts.get(details.tabId) || null,
       ts: Date.now(),
     });
   },
@@ -225,4 +240,5 @@ chrome.webRequest.onHeadersReceived.addListener(
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   chrome.storage.session.remove(STORAGE_KEY(tabId));
+  activeContexts.delete(tabId);
 });

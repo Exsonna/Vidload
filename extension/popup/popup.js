@@ -93,15 +93,52 @@ function formatFromKind(item) {
   return 'MP4';
 }
 
+function sanitizeFilename(s) {
+  return (s || '')
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/^[._]+|[._]+$/g, '')
+    .slice(0, 60);
+}
+
+function extensionForItem(item) {
+  if (item.kind === 'hls' || item.kind === 'dash') return ''; // engine appends .mp4/.ts
+  try {
+    const m = new URL(item.url).pathname.match(/\.(\w{2,4})(?:$|\?)/);
+    if (m) return '.' + m[1].toLowerCase();
+  } catch {}
+  return '.mp4';
+}
+
 function chooseTitle(item) {
   if (item.userLabel) return item.userLabel;
+  if (item.contextLabel) return item.contextLabel;
   if (item.description) return item.description;
   if (item.pageTitle && item.source !== 'network') return item.pageTitle;
   if (looksLikeGibberish(item.label)) {
-    const host = hostFromUrl(item.url);
+    const host = shortHost(item.url);
     return host ? `Video on ${host}` : `${item.kind.toUpperCase()} stream`;
   }
   return item.label;
+}
+
+function chooseFilename(item) {
+  if (item.userLabel) return ensureExtension(sanitizeFilename(item.userLabel), item);
+  let base;
+  if (item.contextLabel) base = item.contextLabel;
+  else if (item.description) base = item.description.slice(0, 40);
+  else if (item.pageTitle && item.source !== 'network') base = item.pageTitle;
+  else {
+    const host = shortHost(item.url).split('.')[0];
+    base = `${host || 'video'}-${Date.now().toString(36).slice(-5)}`;
+  }
+  return ensureExtension(sanitizeFilename(base), item);
+}
+
+function ensureExtension(base, item) {
+  const ext = extensionForItem(item);
+  if (!ext) return base; // HLS/DASH — engine decides
+  return new RegExp(`${ext.replace('.', '\\.')}$`, 'i').test(base) ? base : `${base}${ext}`;
 }
 
 function makeTitleEditable(titleEl, item, rowEl) {
@@ -241,7 +278,7 @@ toggleEl.addEventListener('click', () => {
 
 async function startDownload(item, btn) {
   setDownloadButton(btn, 'Saving…', { disabled: true });
-  const filename = item.userLabel || item.label;
+  const filename = chooseFilename(item);
   if (item.kind === 'hls' || item.kind === 'dash') {
     const res = await chrome.runtime.sendMessage({
       type: 'download-stream',
