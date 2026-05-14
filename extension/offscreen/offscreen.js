@@ -29,9 +29,9 @@ log('offscreen worker loaded');
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.target !== 'offscreen') return false;
   if (msg.type === 'fetch-stream') {
-    log('received fetch-stream', { jobId: msg.jobId, format: msg.format, url: msg.url });
+    log('received fetch-stream', { jobId: msg.jobId, format: msg.format, url: msg.url, saveAs: !!msg.saveAs });
     const runner = msg.format === 'dash' ? runDashJob : runHlsJob;
-    runner(msg.jobId, msg.url, msg.filename).catch((err) => {
+    runner(msg.jobId, msg.url, msg.filename, !!msg.saveAs).catch((err) => {
       warn('job failed', err);
       sendStatus({ type: 'stream-error', jobId: msg.jobId, error: String(err?.message || err) });
     });
@@ -132,15 +132,15 @@ async function downloadSegments({ jobId, parsed, totalSteps, decryptor }) {
   return parts;
 }
 
-async function finalize(jobId, parts, ext, baseFilename, totalSteps) {
+async function finalize(jobId, parts, ext, baseFilename, totalSteps, saveAs) {
   const blob = new Blob(parts, { type: ext === 'mp4' ? 'video/mp4' : 'video/mp2t' });
   const blobUrl = URL.createObjectURL(blob);
   const finalName = deriveFilename(baseFilename, ext);
-  log('blob assembled', { size: blob.size, ext, finalName });
+  log('blob assembled', { size: blob.size, ext, finalName, saveAs: !!saveAs });
   sendStatus({ type: 'stream-progress', jobId, phase: 'save', current: totalSteps, total: totalSteps });
 
   await new Promise((resolve, reject) => {
-    chrome.downloads.download({ url: blobUrl, filename: finalName, saveAs: false }, (downloadId) => {
+    chrome.downloads.download({ url: blobUrl, filename: finalName, saveAs: !!saveAs }, (downloadId) => {
       if (chrome.runtime.lastError) {
         URL.revokeObjectURL(blobUrl);
         reject(new Error(chrome.runtime.lastError.message));
@@ -154,8 +154,8 @@ async function finalize(jobId, parts, ext, baseFilename, totalSteps) {
   });
 }
 
-async function runHlsJob(jobId, playlistUrl, baseFilename) {
-  log('HLS job start', { jobId, playlistUrl });
+async function runHlsJob(jobId, playlistUrl, baseFilename, saveAs) {
+  log('HLS job start', { jobId, playlistUrl, saveAs: !!saveAs });
   sendStatus({ type: 'stream-progress', jobId, phase: 'manifest', current: 0, total: 1 });
 
   let manifestText;
@@ -207,11 +207,11 @@ async function runHlsJob(jobId, playlistUrl, baseFilename) {
   const totalSteps = (parsed.initSegment ? 1 : 0) + parsed.segments.length;
   const parts = await downloadSegments({ jobId, parsed, totalSteps, decryptor });
   const ext = guessOutputExtension(parsed.segments, parsed.initSegment);
-  await finalize(jobId, parts, ext, baseFilename, totalSteps);
+  await finalize(jobId, parts, ext, baseFilename, totalSteps, saveAs);
 }
 
-async function runDashJob(jobId, mpdUrl, baseFilename) {
-  log('DASH job start', { jobId, mpdUrl });
+async function runDashJob(jobId, mpdUrl, baseFilename, saveAs) {
+  log('DASH job start', { jobId, mpdUrl, saveAs: !!saveAs });
   sendStatus({ type: 'stream-progress', jobId, phase: 'manifest', current: 0, total: 1 });
 
   let mpdText;
@@ -240,7 +240,7 @@ async function runDashJob(jobId, mpdUrl, baseFilename) {
 
   const totalSteps = (best.initSegment ? 1 : 0) + best.segments.length;
   const parts = await downloadSegments({ jobId, parsed: best, totalSteps });
-  await finalize(jobId, parts, 'mp4', baseFilename, totalSteps);
+  await finalize(jobId, parts, 'mp4', baseFilename, totalSteps, saveAs);
 }
 
 function deriveFilename(label, ext) {

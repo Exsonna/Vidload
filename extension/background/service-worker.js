@@ -276,7 +276,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
       chrome.downloads.download(
-        { url: msg.url, filename: msg.filename, saveAs: false },
+        { url: msg.url, filename: msg.filename, saveAs: !!msg.saveAs },
         async (downloadId) => {
           if (chrome.runtime.lastError) {
             sendResponse({ ok: false, error: chrome.runtime.lastError.message });
@@ -308,6 +308,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           jobId,
           url: msg.url,
           filename: msg.filename,
+          saveAs: !!msg.saveAs,
         });
         await bumpDownloadCount();
         sendResponse({ ok: true, jobId });

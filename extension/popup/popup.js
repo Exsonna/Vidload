@@ -49,6 +49,8 @@ const paywallFootEl = document.getElementById('paywall-foot');
 const upgradeBtn = document.getElementById('upgrade-btn');
 const paywallBackBtn = document.getElementById('paywall-back');
 const footerEl = document.querySelector('footer');
+const menuEl = document.getElementById('row-menu');
+let menuTarget = null; // { item, rowEl }
 
 // Surface missing elements early so we know what's wrong.
 {
@@ -247,6 +249,71 @@ async function copyUrl(item, btn) {
     console.error('VidLoad: clipboard write failed', e);
   }
 }
+
+function showRowMenu(item, anchorBtn, rowEl) {
+  if (!menuEl || !anchorBtn) return;
+  menuTarget = { item, rowEl, anchorBtn };
+  // Make menu visible first (so we can measure its size) but offscreen.
+  menuEl.style.visibility = 'hidden';
+  menuEl.hidden = false;
+  const rect = anchorBtn.getBoundingClientRect();
+  const menuW = menuEl.offsetWidth || 200;
+  const menuH = menuEl.offsetHeight || 180;
+  let top = rect.bottom + 4;
+  if (top + menuH > window.innerHeight - 4) top = Math.max(4, rect.top - menuH - 4);
+  let left = rect.right - menuW;
+  if (left < 8) left = 8;
+  if (left + menuW > window.innerWidth - 8) left = window.innerWidth - menuW - 8;
+  menuEl.style.top = `${top}px`;
+  menuEl.style.left = `${left}px`;
+  menuEl.style.visibility = '';
+}
+
+function hideRowMenu() {
+  if (!menuEl) return;
+  menuEl.hidden = true;
+  menuTarget = null;
+}
+
+menuEl?.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-action]');
+  if (!btn || !menuTarget) return;
+  const action = btn.dataset.action;
+  const { item, rowEl } = menuTarget;
+  hideRowMenu();
+  try {
+    if (action === 'copy-url') {
+      const moreBtn = rowEl?.querySelector('.more');
+      copyUrl(item, moreBtn);
+    } else if (action === 'open-tab') {
+      chrome.tabs.create({ url: item.url });
+    } else if (action === 'save-as') {
+      const dlBtn = rowEl?.querySelector('.dl');
+      if (dlBtn) startDownload(item, dlBtn, { saveAs: true });
+    } else if (action === 'dismiss') {
+      dismissed.add(item.url);
+      render();
+    }
+  } catch (err) {
+    showError(`Menu action "${action}" failed: ${err?.message || err}`);
+  }
+});
+
+// Outside-click and Escape dismiss the menu. Re-clicking another kebab
+// doesn't trigger this branch — the kebab's own handler reopens it on the
+// new row.
+document.addEventListener('click', (e) => {
+  if (!menuEl || menuEl.hidden) return;
+  if (menuEl.contains(e.target)) return;
+  if (e.target.closest('.more')) return;
+  hideRowMenu();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') hideRowMenu();
+});
+// Scrolling the list moves the kebab but the fixed menu stays put — easier
+// to dismiss than to track.
+listEl?.addEventListener('scroll', () => hideRowMenu(), { passive: true });
 
 // Probe HLS/DASH manifests for duration + bandwidth + resolution. We don't get
 // any of these from webRequest headers — the playlist content is the only
@@ -560,7 +627,10 @@ function renderRow(item) {
   });
 
   const moreBtn = node.querySelector('.more');
-  moreBtn?.addEventListener('click', () => copyUrl(item, moreBtn));
+  moreBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    showRowMenu(item, moreBtn, node);
+  });
 
   const dlBtn = node.querySelector('.dl');
   dlBtn?.addEventListener('click', () => startDownload(item, dlBtn));
@@ -584,7 +654,8 @@ async function refreshTier() {
   }
 }
 
-async function startDownload(item, btn) {
+async function startDownload(item, btn, opts = {}) {
+  const saveAs = !!opts.saveAs;
   setDownloadButton(btn, 'Saving…', { disabled: true });
   const filename = chooseFilename(item);
   try {
@@ -594,6 +665,7 @@ async function startDownload(item, btn) {
         format: item.kind,
         url: item.url,
         filename,
+        saveAs,
       });
       if (res?.error === 'paywall') {
         setDownloadButton(btn, 'Download');
@@ -614,6 +686,7 @@ async function startDownload(item, btn) {
       type: 'download',
       url: item.url,
       filename,
+      saveAs,
     });
     if (res?.error === 'paywall') {
       setDownloadButton(btn, 'Download');

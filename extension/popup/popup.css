@@ -424,3 +424,52 @@ button.dl.copied { background: #16a34a; }
 .more.copied { background: #dcfce7; color: #166534; border-color: #86efac; }
 
 .row.dismissed { display: none; }
+
+/* ==========================================================================
+   Row context menu (kebab dropdown)
+   ========================================================================== */
+
+.row-menu {
+  position: fixed;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  z-index: 100;
+  min-width: 200px;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: none;
+  border: 0;
+  padding: 8px 14px;
+  color: #374151;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  font-size: inherit;
+  letter-spacing: 0.1px;
+}
+
+.menu-item:hover { background: #f3f4f6; color: #111827; }
+.menu-item.danger { color: #b91c1c; }
+.menu-item.danger:hover { background: #fef2f2; color: #991b1b; }
+
+.menu-icon {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+.menu-divider {
+  border-top: 1px solid #e5e7eb;
+  margin: 4px 0;
+}
