@@ -349,6 +349,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg?.type === 'commit-download' && msg.url) {
+    // Offscreen document can't call chrome.downloads (Chrome restricts that
+    // API inside offscreen contexts). It hands the blob URL here for the SW
+    // to commit. Gating already happened when 'download-stream' was accepted,
+    // so we don't re-gate.
+    chrome.downloads.download(
+      { url: msg.url, filename: msg.filename, saveAs: !!msg.saveAs },
+      (downloadId) => {
+        if (chrome.runtime.lastError) {
+          sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+        } else {
+          sendResponse({ ok: true, downloadId });
+        }
+      }
+    );
+    return true;
+  }
+
   if (msg?.type === 'download-stream' && msg.url) {
     (async () => {
       const gate = await gateDownload();

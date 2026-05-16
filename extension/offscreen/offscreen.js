@@ -139,19 +139,31 @@ async function finalize(jobId, parts, ext, baseFilename, totalSteps, saveAs) {
   log('blob assembled', { size: blob.size, ext, finalName, saveAs: !!saveAs });
   sendStatus({ type: 'stream-progress', jobId, phase: 'save', current: totalSteps, total: totalSteps });
 
-  await new Promise((resolve, reject) => {
-    chrome.downloads.download({ url: blobUrl, filename: finalName, saveAs: !!saveAs }, (downloadId) => {
-      if (chrome.runtime.lastError) {
-        URL.revokeObjectURL(blobUrl);
-        reject(new Error(chrome.runtime.lastError.message));
-      } else {
-        setTimeout(() => URL.revokeObjectURL(blobUrl), REVOKE_DELAY_MS);
-        log('download started', { downloadId, finalName });
-        sendStatus({ type: 'stream-done', jobId, filename: finalName, downloadId, bytes: blob.size });
-        resolve();
-      }
+  // chrome.downloads is not available inside offscreen documents — Chrome
+  // restricts the API surface there. Hand the blob URL off to the SW, which
+  // can call chrome.downloads.download. The URL is reachable across same-origin
+  // extension contexts as long as offscreen stays alive (we keep it alive
+  // long enough by awaiting the response).
+  let result;
+  try {
+    result = await chrome.runtime.sendMessage({
+      type: 'commit-download',
+      jobId,
+      url: blobUrl,
+      filename: finalName,
+      saveAs: !!saveAs,
     });
-  });
+  } catch (err) {
+    URL.revokeObjectURL(blobUrl);
+    throw new Error(`commit-download dispatch failed: ${err?.message || err}`);
+  }
+  if (!result?.ok) {
+    URL.revokeObjectURL(blobUrl);
+    throw new Error(result?.error || 'commit-download failed');
+  }
+  setTimeout(() => URL.revokeObjectURL(blobUrl), REVOKE_DELAY_MS);
+  log('download started', { downloadId: result.downloadId, finalName });
+  sendStatus({ type: 'stream-done', jobId, filename: finalName, downloadId: result.downloadId, bytes: blob.size });
 }
 
 async function runHlsJob(jobId, playlistUrl, baseFilename, saveAs) {
