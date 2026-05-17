@@ -51,14 +51,20 @@ const REFERER_RULES = [
 ];
 
 async function setupRefererRules() {
+  // Session-scoped rules (not dynamic) because Chrome only honors the
+  // tabIds / excludedTabIds condition keys on session rules. tabIds: [-1]
+  // is what scopes the Referer rewrite to extension-originated requests
+  // only (SW / offscreen / popup) so the user's normal browsing is
+  // untouched. Session rules are cleared on browser restart — we
+  // re-register on startup below.
   try {
-    const existing = await chrome.declarativeNetRequest.getDynamicRules();
+    const existing = await chrome.declarativeNetRequest.getSessionRules();
     const ourIds = existing.filter((r) => r.id >= 1001 && r.id <= 1099).map((r) => r.id);
-    await chrome.declarativeNetRequest.updateDynamicRules({
+    await chrome.declarativeNetRequest.updateSessionRules({
       removeRuleIds: ourIds,
       addRules: REFERER_RULES,
     });
-    console.log('[VidLoad SW] Referer rewrite rules registered:', REFERER_RULES.length);
+    console.log('[VidLoad SW] Referer rewrite session rules registered:', REFERER_RULES.length);
   } catch (err) {
     console.error('[VidLoad SW] Failed to set up Referer rules', err);
   }
@@ -74,7 +80,8 @@ chrome.runtime.onStartup.addListener(() => setupRefererRules());
 const MONETIZATION = {
   enabled: false,                    // flip to true once ExtPay is configured
   extpayId: 'vidload',               // replace with your extensionpay.com id
-  freeDailyLimit: 3,                 // downloads/day on the free tier
+  trialDays: 7,                      // free-trial length on fresh install
+  freeDailyLimit: 3,                 // downloads/day after the trial expires
   priceLabel: '$4.99 one-time',      // shown in the paywall UI
 };
 
@@ -88,6 +95,20 @@ if (MONETIZATION.enabled && typeof ExtPay === 'function') {
 }
 
 const DOWNLOAD_COUNTER_KEY = 'vidload_downloads';
+const INSTALL_TS_KEY = 'vidload_install_ts';
+const DAY_MS = 86_400_000;
+
+// Trial timer starts on first install — not on update — so existing users keep
+// any time they had left if we later update the build.
+chrome.runtime.onInstalled.addListener(async (details) => {
+  if (details.reason !== 'install') return;
+  try {
+    await chrome.storage.local.set({ [INSTALL_TS_KEY]: Date.now() });
+    console.log(`[VidLoad] Free trial started (${MONETIZATION.trialDays}d)`);
+  } catch (err) {
+    console.error('[VidLoad] Failed to record install timestamp', err);
+  }
+});
 
 function todayKey() {
   return new Date().toISOString().slice(0, 10);
@@ -123,8 +144,32 @@ async function isPaid() {
   }
 }
 
+async function getTrialStatus() {
+  if (!MONETIZATION.enabled) return { active: false, daysLeft: 0 };
+  const stored = await chrome.storage.local.get(INSTALL_TS_KEY);
+  const installTs = stored[INSTALL_TS_KEY];
+  // No recorded timestamp = either onInstalled hasn't fired yet (first run
+  // race) or storage was wiped. Treat as fresh trial — generous fallback
+  // because the alternative (denying trial) feels punitive.
+  if (!installTs) return { active: true, daysLeft: MONETIZATION.trialDays };
+  const elapsed = Date.now() - installTs;
+  const total = MONETIZATION.trialDays * DAY_MS;
+  if (elapsed >= total) return { active: false, daysLeft: 0 };
+  return { active: true, daysLeft: Math.max(1, Math.ceil((total - elapsed) / DAY_MS)) };
+}
+
 async function gateDownload() {
-  if (await isPaid()) return { allowed: true, paid: true };
+  if (await isPaid()) return { allowed: true, paid: true, metered: false };
+  const trial = await getTrialStatus();
+  if (trial.active) {
+    return {
+      allowed: true,
+      paid: false,
+      trialActive: true,
+      trialDaysLeft: trial.daysLeft,
+      metered: false,
+    };
+  }
   const data = await getDownloadStats();
   if (data.count >= MONETIZATION.freeDailyLimit) {
     return {
@@ -133,6 +178,7 @@ async function gateDownload() {
       limit: MONETIZATION.freeDailyLimit,
       used: data.count,
       priceLabel: MONETIZATION.priceLabel,
+      metered: false,
     };
   }
   return {
@@ -140,6 +186,7 @@ async function gateDownload() {
     paid: false,
     limit: MONETIZATION.freeDailyLimit,
     used: data.count,
+    metered: true,
   };
 }
 
@@ -268,9 +315,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       const data = await getDownloadStats();
       const paid = await isPaid();
+      const trial = await getTrialStatus();
       sendResponse({
         monetizationEnabled: MONETIZATION.enabled,
         paid,
+        trialActive: trial.active,
+        trialDaysLeft: trial.daysLeft,
+        trialTotalDays: MONETIZATION.trialDays,
         limit: MONETIZATION.freeDailyLimit,
         used: data.count,
         priceLabel: MONETIZATION.priceLabel,
@@ -340,7 +391,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           if (chrome.runtime.lastError) {
             sendResponse({ ok: false, error: chrome.runtime.lastError.message });
           } else {
-            await bumpDownloadCount();
+            // Only count downloads that consume the free-tier quota.
+            // Trial and paid downloads are unlimited.
+            if (gate.metered) await bumpDownloadCount();
             sendResponse({ ok: true, downloadId });
           }
         }
@@ -387,7 +440,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           filename: msg.filename,
           saveAs: !!msg.saveAs,
         });
-        await bumpDownloadCount();
+        if (gate.metered) await bumpDownloadCount();
         sendResponse({ ok: true, jobId });
       } catch (err) {
         sendResponse({ ok: false, error: String(err?.message || err) });

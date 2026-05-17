@@ -67,6 +67,57 @@ let showHidden = false;
 const dismissed = new Set();
 let tierStatus = { monetizationEnabled: false, paid: true };
 
+// =============================================================================
+// User-data persistence (dismissed + renames). Single map in chrome.storage.local
+// keyed by URL. Survives popup close/reopen. Unbounded growth for now — CDN URLs
+// are unique-per-stream so duplicates are rare; revisit if storage gets noisy.
+// =============================================================================
+const USERDATA_KEY = 'vidload:userdata';
+let userdata = {}; // { [url]: { dismissed?: true, label?: string } }
+
+async function loadUserdata() {
+  try {
+    const stored = await chrome.storage.local.get(USERDATA_KEY);
+    userdata = stored?.[USERDATA_KEY] || {};
+  } catch (err) {
+    console.debug('VidLoad: userdata load failed', err?.message || err);
+    userdata = {};
+  }
+}
+
+function saveUserdata() {
+  chrome.storage.local.set({ [USERDATA_KEY]: userdata }).catch((err) =>
+    console.debug('VidLoad: userdata save failed', err?.message || err)
+  );
+}
+
+function rememberDismissed(url) {
+  if (!url) return;
+  userdata[url] = userdata[url] || {};
+  userdata[url].dismissed = true;
+  dismissed.add(url);
+  saveUserdata();
+}
+
+function rememberLabel(url, label) {
+  if (!url || !label) return;
+  userdata[url] = userdata[url] || {};
+  userdata[url].label = label;
+  saveUserdata();
+}
+
+function applyUserdata(items) {
+  for (const item of items || []) {
+    const ud = userdata[item?.url];
+    if (!ud) continue;
+    if (ud.dismissed) dismissed.add(item.url);
+    if (ud.label) {
+      item.userLabel = ud.label;
+      item.label = ud.label;
+    }
+  }
+}
+
 async function getActiveTabId() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab?.id;
@@ -131,12 +182,25 @@ function hasMetadata(item) {
   return !!(item?.poster || item?.description || item?.duration || (item?.width && item?.height));
 }
 
+function looksLikeStreamSegment(item) {
+  if (!item?.url) return false;
+  try {
+    return /\.(m4s|ts)(?:$|\?)/i.test(new URL(item.url).pathname);
+  } catch {
+    return false;
+  }
+}
+
 function isFilteredOut(item) {
   if (!item) return true;
   if (item.kind !== 'direct') return false;
   if (item.source !== 'network') return false;
   if (hasMetadata(item)) return false;
   if (item.bytes != null && item.bytes < MIN_DIRECT_BYTES) return true;
+  // .m4s / .ts captured as standalone direct downloads are HLS/DASH sub-segments,
+  // not playable standalone videos. Without metadata (duration/poster/dims) there's
+  // no way to surface them usefully — hide unless the user opts into "show hidden".
+  if (looksLikeStreamSegment(item)) return true;
   return false;
 }
 
@@ -225,6 +289,7 @@ function makeTitleEditable(titleEl, item) {
       if (next) {
         item.userLabel = next;
         item.label = next;
+        rememberLabel(item.url, next);
       }
     }
     titleEl.textContent = chooseTitle(item);
@@ -291,7 +356,7 @@ menuEl?.addEventListener('click', (e) => {
       const dlBtn = rowEl?.querySelector('.dl');
       if (dlBtn) startDownload(item, dlBtn, { saveAs: true });
     } else if (action === 'dismiss') {
-      dismissed.add(item.url);
+      rememberDismissed(item.url);
       render();
     }
   } catch (err) {
@@ -336,13 +401,10 @@ async function parseHlsMetadata(text, baseUrl) {
   let bandwidth = null;
   let width = null;
   let height = null;
+  let variants = [];
 
   if (text.includes('#EXT-X-STREAM-INF')) {
     const lines = text.split(/\r?\n/);
-    let bestBw = 0;
-    let bestUrl = null;
-    let bestW = null;
-    let bestH = null;
     for (let i = 0; i < lines.length; i++) {
       if (!lines[i].startsWith('#EXT-X-STREAM-INF')) continue;
       const bwMatch = lines[i].match(/BANDWIDTH=(\d+)/);
@@ -351,21 +413,25 @@ async function parseHlsMetadata(text, baseUrl) {
       let j = i + 1;
       while (j < lines.length && lines[j].trim().startsWith('#')) j++;
       const next = lines[j]?.trim();
-      if (next && bwVal > bestBw) {
-        bestBw = bwVal;
-        bestUrl = new URL(next, baseUrl).href;
-        if (resMatch) {
-          bestW = parseInt(resMatch[1], 10);
-          bestH = parseInt(resMatch[2], 10);
-        }
-      }
+      if (!next) continue;
+      let url;
+      try { url = new URL(next, baseUrl).href; } catch { continue; }
+      variants.push({
+        url,
+        bandwidth: bwVal || null,
+        width: resMatch ? parseInt(resMatch[1], 10) : null,
+        height: resMatch ? parseInt(resMatch[2], 10) : null,
+      });
     }
-    if (!bestUrl) return null;
-    bandwidth = bestBw;
-    width = bestW;
-    height = bestH;
-    const res = await fetch(bestUrl, { credentials: 'include' });
-    if (!res.ok) return { duration: null, bandwidth, width, height };
+    if (variants.length === 0) return null;
+    // Sort highest-quality first so [0] is the default pick.
+    variants.sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0));
+    const best = variants[0];
+    bandwidth = best.bandwidth;
+    width = best.width;
+    height = best.height;
+    const res = await fetch(best.url, { credentials: 'include' });
+    if (!res.ok) return { duration: null, bandwidth, width, height, variants };
     text = await res.text();
   }
 
@@ -375,7 +441,7 @@ async function parseHlsMetadata(text, baseUrl) {
     if (m) total += parseFloat(m[1]);
   }
   const duration = total > 0 ? Math.round(total) : null;
-  return { duration, bandwidth, width, height };
+  return { duration, bandwidth, width, height, variants };
 }
 
 function parseDashMetadata(mpdText) {
@@ -409,6 +475,26 @@ function parseDashMetadata(mpdText) {
   return { duration, bandwidth: bandwidth || null, width, height };
 }
 
+function variantLabel(v) {
+  if (v?.height) return qualityLabel(v.width, v.height) || `${v.height}p`;
+  if (v?.bandwidth) return `${Math.round(v.bandwidth / 1000)}kbps`;
+  return 'auto';
+}
+
+function populateVariantPicker(item, pickerEl) {
+  if (!pickerEl || !item?.variants || item.variants.length < 2) return;
+  pickerEl.replaceChildren();
+  item.variants.forEach((v, idx) => {
+    const opt = document.createElement('option');
+    opt.value = v.url;
+    opt.textContent = variantLabel(v);
+    if (idx === 0) opt.selected = true;
+    pickerEl.appendChild(opt);
+  });
+  item.selectedVariantUrl = item.variants[0].url;
+  pickerEl.hidden = false;
+}
+
 function maybeProbeMetadata(item, refs) {
   if (!item || item._probed) return;
   if (item.kind !== 'hls' && item.kind !== 'dash') return;
@@ -433,6 +519,10 @@ function maybeProbeMetadata(item, refs) {
           refs.sizePill.textContent = '~' + formatBytes(item.estimatedBytes);
         }
       }
+      if (meta.variants && meta.variants.length) {
+        item.variants = meta.variants;
+        if (refs.pickerEl?.isConnected) populateVariantPicker(item, refs.pickerEl);
+      }
     })
     .catch((err) => console.debug('VidLoad: probe rejected', err?.message || err));
 }
@@ -448,9 +538,16 @@ function renderTier(status) {
   if (status.paid) {
     tierBadgeEl.textContent = 'Pro';
     tierBadgeEl.className = 'pro';
+    tierBadgeEl.title = 'Unlimited downloads';
+  } else if (status.trialActive) {
+    const d = status.trialDaysLeft;
+    tierBadgeEl.textContent = `Trial · ${d}d`;
+    tierBadgeEl.className = 'trial';
+    tierBadgeEl.title = `Free trial — ${d} day${d === 1 ? '' : 's'} left. Unlimited downloads until then.`;
   } else {
     tierBadgeEl.textContent = `Free · ${status.used}/${status.limit}`;
     tierBadgeEl.className = 'free';
+    tierBadgeEl.title = `${status.used} of ${status.limit} free downloads used today.`;
   }
 }
 
@@ -554,6 +651,17 @@ function renderRow(item) {
     if (item.kind) formatBadge.classList.add(item.kind);
   }
 
+  const variantPicker = node.querySelector('.variant-picker');
+  if (variantPicker) {
+    if (item.variants && item.variants.length > 1) {
+      populateVariantPicker(item, variantPicker);
+    }
+    variantPicker.addEventListener('change', () => {
+      item.selectedVariantUrl = variantPicker.value || null;
+    });
+    variantPicker.addEventListener('click', (e) => e.stopPropagation());
+  }
+
   const quality = node.querySelector('.thumb-quality');
   if (quality) quality.textContent = qualityLabel(item.width, item.height) || '';
 
@@ -586,11 +694,12 @@ function renderRow(item) {
   }
 
   // Kick off the manifest probe — fills in duration overlay, resolution
-  // badge, and estimated size pill as they resolve.
+  // badge, estimated size pill, and variant picker as they resolve.
   maybeProbeMetadata(item, {
     durEl,
     qualityEl: quality,
     sizePill: keepSizePill ? sizePill : null,
+    pickerEl: variantPicker,
   });
 
   const sourcePill = node.querySelector('.source-pill');
@@ -622,7 +731,7 @@ function renderRow(item) {
   });
 
   node.querySelector('.dismiss')?.addEventListener('click', () => {
-    dismissed.add(item.url);
+    rememberDismissed(item.url);
     render();
   });
 
@@ -660,10 +769,14 @@ async function startDownload(item, btn, opts = {}) {
   const filename = chooseFilename(item);
   try {
     if (item.kind === 'hls' || item.kind === 'dash') {
+      // HLS variant picker: if the user chose a specific quality, pass that
+      // variant's URL directly. offscreen.js will see a media playlist (no
+      // STREAM-INF lines) and skip the master-pick branch.
+      const streamUrl = (item.kind === 'hls' && item.selectedVariantUrl) || item.url;
       const res = await chrome.runtime.sendMessage({
         type: 'download-stream',
         format: item.kind,
-        url: item.url,
+        url: streamUrl,
         filename,
         saveAs,
       });
@@ -731,6 +844,7 @@ chrome.runtime.onMessage.addListener((msg) => {
 
 (async () => {
   try {
+    await loadUserdata();
     await refreshTier();
     const tabId = await getActiveTabId();
     if (tabId === undefined) {
@@ -739,6 +853,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     }
     const res = await chrome.runtime.sendMessage({ type: 'list', tabId });
     allItems = res?.items || [];
+    applyUserdata(allItems);
     render();
   } catch (err) {
     showError(`Startup failed: ${err?.message || err}\n${err?.stack || ''}`);

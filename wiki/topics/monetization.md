@@ -2,11 +2,14 @@
 
 ## Decision
 
-VidLoad monetizes via **ExtensionPay** with a free tier and one-time unlock:
+VidLoad monetizes via **ExtensionPay** with a free trial, a free tier, and a one-time unlock:
 
-- **Free tier**: 3 downloads per day (counter resets at midnight local time)
-- **Pro**: $4.99 one-time → lifetime unlimited downloads
-- **Stripe** handles payments via ExtensionPay; we don't run our own backend
+- **Free trial**: 7 days of unlimited downloads on first install (v0.4.12). Auto-starts — no signup required. Downloads during the trial do **not** count against any daily quota.
+- **Free tier (post-trial)**: 3 downloads per day (counter resets at midnight local time).
+- **Pro**: $4.99 one-time → lifetime unlimited downloads.
+- **Stripe** handles payments via ExtensionPay; we don't run our own backend.
+
+The trial scaffolding is wired but **disabled by default** along with the rest of the monetization stack. Flip `MONETIZATION.enabled = true` to activate everything at once.
 
 ## Why ExtensionPay
 
@@ -58,7 +61,21 @@ Stored in `chrome.storage.local` under `vidload_downloads`:
 { date: '2026-05-14', count: 2 }
 ```
 
-Counter increments after each successful `chrome.downloads.download()` call (or successful HLS/DASH job start). On midnight local time the date check triggers a reset to 0.
+Counter increments after each successful `chrome.downloads.download()` call (or successful HLS/DASH job start) **only when `gate.metered === true`** — i.e. only when the user is on the free tier. Trial and Pro downloads bypass the counter entirely, so day 8 starts at 0 regardless of trial-day activity.
+
+On midnight local time the date check triggers a reset to 0.
+
+## Trial timer
+
+Stored separately in `chrome.storage.local` under `vidload_install_ts`:
+
+```js
+{ vidload_install_ts: 1747353600000 }  // ms epoch
+```
+
+Written exactly once, on `chrome.runtime.onInstalled` with `details.reason === 'install'`. Subsequent updates leave it untouched so we don't reset trial time when the extension auto-updates from the Web Store. Uninstall + reinstall = fresh trial (matches the ExtPay paid-status persistence semantics — `paid` survives reinstall via the per-extension user ID, but the trial timer doesn't).
+
+`getTrialStatus()` returns `{ active, daysLeft }`. If `enabled = false` or `installTs` missing, falls back to `{ active: true, daysLeft: trialDays }` (generous default — easier to err on the side of letting users in than locking them out on edge cases).
 
 ## Configuration toggle
 
@@ -68,7 +85,8 @@ Counter increments after each successful `chrome.downloads.download()` call (or 
 const MONETIZATION = {
   enabled: false,                    // master switch
   extpayId: 'vidload',               // from extensionpay.com dashboard
-  freeDailyLimit: 3,
+  trialDays: 7,                      // free-trial length on fresh install
+  freeDailyLimit: 3,                 // downloads/day after the trial expires
   priceLabel: '$4.99 one-time',
 };
 ```
