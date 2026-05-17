@@ -33,6 +33,6 @@ The two builds also differ in `manifest.json` description, screenshots, and stor
 
 ## See also
 
-- [[INDEX]] — wiki entry point
+- [[ClaudeRoot/_brain/INDEX]] — wiki entry point
 - `extension/manifest.json` — current MV3 manifest (no YouTube)
 - Roadmap: v0.3 introduces site adapters; v0.4 introduces ExtensionPay monetization at $4.99 one-time

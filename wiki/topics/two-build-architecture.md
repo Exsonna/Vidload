@@ -86,6 +86,6 @@ The SW dedupes by URL within a tab and surfaces the items in the popup just like
 
 - [[chrome-extension-policy]] — the policy reasoning behind the split
 - [[hls-download-approach]] — how downloads actually happen
-- [[INDEX]] — wiki entry point
+- [[ClaudeRoot/_brain/INDEX]] — wiki entry point
 - `build.mjs` — the build script
 - `extension/adapters/` — adapter source

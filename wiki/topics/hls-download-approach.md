@@ -44,6 +44,7 @@ If any of those land, the migration path is: introduce Vite + FFmpeg.wasm in a w
 ## See also
 
 - [[chrome-extension-policy]] — the broader two-build strategy
-- [[INDEX]] — wiki entry point
+- [[offscreen-api-limits]] — why `chrome.downloads` calls must be routed through the SW (v0.4.8 fix)
+- [[ClaudeRoot/_brain/INDEX]] — wiki entry point
 - `extension/offscreen/offscreen.js` — the engine
 - `extension/lib/hls.js` — parser + AES helpers
