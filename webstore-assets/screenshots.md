@@ -65,9 +65,18 @@ If you produce a 440 × 280 promo tile, use the same hero-shot composition as Sc
 
 ## Final checklist before upload
 
-- [ ] No YouTube URL, logo, or watermark visible in any shot.
-- [ ] No Instagram/TikTok/Twitter logos in the *hero* shot. (Showing them as platform badges in later shots is fine.)
-- [ ] No personal info (bookmarks bar, profile photo, email, real names in tabs).
-- [ ] All annotations match the actual UI in the build you're submitting.
-- [ ] All five shots are 1280 × 800 PNG.
+- [x] No YouTube URL, logo, or watermark visible in generated shots.
+- [x] No Instagram/TikTok/Twitter logos in the generated hero shot.
+- [x] No personal info (bookmarks bar, profile photo, email, real names in tabs).
+- [x] All annotations match the current generated screenshot composition.
+- [x] Toolbar icon matches `extension/icons/icon-16.png` after reloading the extension.
+- [x] All five generated shots are 1280 × 800 PNG.
 - [ ] If you re-shot any screenshot, the build version (manifest.json `version`) matches across them — don't mix shots from v0.4 and v0.5.
+
+Generated screenshots live in `webstore-assets/screenshots/`:
+
+- `01-hero-detected-videos.png`
+- `02-quality-picker.png`
+- `03-stream-formats.png`
+- `04-smart-filenames.png`
+- `05-trial-upgrade.png`

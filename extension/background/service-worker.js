@@ -298,6 +298,25 @@ function makeJobId() {
 
 const activeContexts = new Map();
 
+async function backfillActiveContext(tabId, label) {
+  if (!label) return;
+  try {
+    const items = await getTabItems(tabId);
+    const cutoff = Date.now() - 30_000;
+    let changed = false;
+    for (const item of items) {
+      if (item.contextLabel) continue;
+      if (item.source !== 'network') continue;
+      if (item.ts && item.ts < cutoff) continue;
+      item.contextLabel = label;
+      changed = true;
+    }
+    if (changed) await setTabItems(tabId, items);
+  } catch (err) {
+    console.debug('[VidLoad SW] active context backfill failed', err?.message || err);
+  }
+}
+
 // =============================================================================
 // Message router
 // =============================================================================
@@ -306,8 +325,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.target && msg.target !== 'sw') return false;
 
   if (msg?.type === 'active-context' && sender.tab?.id !== undefined) {
-    if (msg.label) activeContexts.set(sender.tab.id, msg.label);
-    else activeContexts.delete(sender.tab.id);
+    if (msg.label) {
+      activeContexts.set(sender.tab.id, msg.label);
+      backfillActiveContext(sender.tab.id, msg.label);
+    } else {
+      activeContexts.delete(sender.tab.id);
+    }
     return false;
   }
 

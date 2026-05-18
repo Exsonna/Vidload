@@ -1,6 +1,6 @@
 # VidLoad Privacy Policy
 
-**Effective date:** _[fill in the date you publish this]_
+**Effective date:** May 18, 2026
 
 VidLoad is a browser extension that detects and downloads videos from webpages you visit. This document describes exactly what data the extension handles and what it does not.
 
@@ -90,5 +90,5 @@ If we change this policy, we will update the "Effective date" at the top and pos
 
 For questions about this policy or about VidLoad:
 
-**Email:** _[your support email here]_
-**Project:** _[your marketing site or GitHub repo URL]_
+**Email:** 150140419@qq.com
+**Project:** https://exsonna.github.io/Vidload/

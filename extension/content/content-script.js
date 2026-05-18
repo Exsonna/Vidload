@@ -27,11 +27,59 @@ function looksLikeTimestamp(s) {
   return /^\s*\d+\s*[smhdwy]\s*$/i.test(s) || /^\s*[·•]\s*$/.test(s);
 }
 
+function cleanContextText(s, max = 80) {
+  return (s || '')
+    .replace(/\s+/g, ' ')
+    .replace(/[\\/:*?"<>|]/g, '')
+    .trim()
+    .slice(0, max);
+}
+
+function twitterHandleFromHref(href) {
+  const m = (href || '').match(/^\/([^/?#]+)\/?$/);
+  if (!m) return null;
+  if (/^(home|explore|notifications|messages|i|search|settings|compose|tos|privacy)$/i.test(m[1])) {
+    return null;
+  }
+  return `@${m[1]}`;
+}
+
+function findArticleContext(container) {
+  if (!container) return null;
+
+  let author = null;
+  const links = container.querySelectorAll('header a[href^="/"], a[href^="/"]');
+  for (const link of links) {
+    const href = link.getAttribute('href') || '';
+    if (/\/(p|reel|reels|tv|status|photo|video)\//.test(href)) continue;
+    const handle = twitterHandleFromHref(href);
+    const text = cleanContextText((link.textContent || '').split('\n')[0], 48);
+    const candidate = handle || text;
+    if (candidate && !looksLikeTimestamp(candidate)) {
+      author = candidate;
+      break;
+    }
+  }
+
+  const tweetText =
+    container.querySelector('[data-testid="tweetText"]') ||
+    container.querySelector('div[lang]');
+  const excerpt = cleanContextText(tweetText?.textContent, 90);
+
+  if (author && excerpt) return `${author} - ${excerpt}`;
+  if (excerpt) return excerpt;
+  if (author) return author;
+  return null;
+}
+
 function findContextForVideo(videoEl) {
   // Tier 1: enclosing <article> or role="article" — Instagram, Twitter,
   // and most social patterns wrap each post in one.
   let container = videoEl.closest('article, [role="article"]');
   if (container) {
+    const articleContext = findArticleContext(container);
+    if (articleContext) return articleContext;
+
     // First profile-style link that isn't a post permalink.
     const links = container.querySelectorAll('header a[href^="/"], a[href^="/"]');
     for (const link of links) {
@@ -138,18 +186,7 @@ function findCenterArticle() {
     if (d < bestDist) { bestDist = d; best = a; }
   });
   if (!best) return null;
-  // Reuse findContextForVideo's article logic — pass any descendant as the
-  // "anchor". A dummy text node won't work, so look for any heading or link directly.
-  const links = best.querySelectorAll('header a[href^="/"], a[href^="/"]');
-  for (const link of links) {
-    const href = link.getAttribute('href') || '';
-    if (/\/(p|reel|reels|tv|status|photo|video)\//.test(href)) continue;
-    const text = (link.textContent || '').trim().split('\n')[0].trim();
-    if (text && text.length > 0 && text.length < 60 && !looksLikeTimestamp(text)) {
-      return text;
-    }
-  }
-  return null;
+  return findArticleContext(best);
 }
 
 function inferFromUrl() {

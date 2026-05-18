@@ -20,6 +20,63 @@
     return t ? t.slice(0, 80) : `twitter-${Date.now()}`;
   }
 
+  function cleanText(s, max = 90) {
+    return (s || '')
+      .replace(/\s+/g, ' ')
+      .replace(/[\\/:*?"<>|]/g, '')
+      .trim()
+      .slice(0, max);
+  }
+
+  function handleFromHref(href) {
+    const m = (href || '').match(/^\/([^/?#]+)\/?$/);
+    if (!m) return null;
+    if (/^(home|explore|notifications|messages|i|search|settings|compose|tos|privacy)$/i.test(m[1])) {
+      return null;
+    }
+    return `@${m[1]}`;
+  }
+
+  function articleContext(article) {
+    if (!article) return null;
+    let author = null;
+    for (const link of article.querySelectorAll('header a[href^="/"], a[href^="/"]')) {
+      const href = link.getAttribute('href') || '';
+      if (/\/status\//.test(href)) continue;
+      const candidate = handleFromHref(href) || cleanText((link.textContent || '').split('\n')[0], 48);
+      if (candidate) {
+        author = candidate;
+        break;
+      }
+    }
+    const textEl = article.querySelector('[data-testid="tweetText"]') || article.querySelector('div[lang]');
+    const excerpt = cleanText(textEl?.textContent, 90);
+    if (author && excerpt) return `${author} - ${excerpt}`;
+    return excerpt || author;
+  }
+
+  function nearestContextLabel() {
+    const status = location.pathname.match(/^\/([^/]+)\/status\/(\d+)/);
+    const articles = [...document.querySelectorAll('article, [role="article"]')];
+    if (articles.length === 0) {
+      return status ? `@${status[1]} - ${status[2]}` : null;
+    }
+
+    const center = window.innerHeight / 2;
+    let best = null;
+    let bestDist = Infinity;
+    for (const article of articles) {
+      const rect = article.getBoundingClientRect();
+      if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+      const dist = Math.abs(((rect.top + rect.bottom) / 2) - center);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = article;
+      }
+    }
+    return articleContext(best || articles[0]) || (status ? `@${status[1]} - ${status[2]}` : null);
+  }
+
   function getMeta(prop, attr = 'property') {
     const el = document.querySelector(`meta[${attr}="${prop}"]`);
     const v = el?.getAttribute('content');
@@ -42,6 +99,7 @@
     const items = [];
     const poster = getPoster();
     const description = getDescription();
+    const contextLabel = nearestContextLabel();
     const selectors = [
       ['twitter:player:stream', 'name'],
       ['og:video', 'property'],
@@ -50,7 +108,7 @@
     ];
     for (const [name, attr] of selectors) {
       const v = getMeta(name, attr);
-      if (v) items.push({ url: v, label: pageLabel(), kind: inferKind(v), poster, description });
+      if (v) items.push({ url: v, label: pageLabel(), kind: inferKind(v), poster, description, contextLabel });
     }
     return items;
   }
@@ -60,6 +118,7 @@
     const seen = new Set();
     const poster = getPoster();
     const description = getDescription();
+    const contextLabel = nearestContextLabel();
     const mediaUrl = /"url"\s*:\s*"(https:\/\/(?:video\.twimg\.com|[^"]*\.twimg\.com)[^"]*\.(?:mp4|m3u8|mpd)(?:\?[^"]*)?)"/gi;
     document.querySelectorAll('script[type="application/ld+json"], script[type="application/json"]').forEach((el) => {
       const text = el.textContent || '';
@@ -67,7 +126,7 @@
         const url = unescapeJsonUrl(m[1]);
         if (seen.has(url)) continue;
         seen.add(url);
-        items.push({ url, label: pageLabel(), kind: inferKind(url), poster, description });
+        items.push({ url, label: pageLabel(), kind: inferKind(url), poster, description, contextLabel });
       }
     });
     return items;

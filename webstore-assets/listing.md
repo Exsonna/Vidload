@@ -69,7 +69,7 @@ KEYBOARD / WORKFLOW
 
 SUPPORT
 
-Questions, broken sites, feature requests: [your support email or URL here]
+Questions, broken sites, feature requests: https://exsonna.github.io/Vidload/support.html
 ```
 
 ---
@@ -134,6 +134,8 @@ These are optional but recommended:
 | Marquee promo tile | 1400 × 560 | Optional (for featured placement) |
 
 See `screenshots.md` for screenshot guidelines (those are separate from promo tiles and *are* required).
+
+Support URL: https://exsonna.github.io/Vidload/support.html
 
 ---
 
