@@ -9,6 +9,7 @@
 
 const seen = new Set();
 let activeContext = null;
+let lastContextSig = null;
 let updateTimer = null;
 
 function filenameFromUrl(raw) {
@@ -33,6 +34,14 @@ function cleanContextText(s, max = 80) {
     .replace(/[\\/:*?"<>|]/g, '')
     .trim()
     .slice(0, max);
+}
+
+// Generic player chrome that isn't a real video name. Players like Hotmart's
+// set aria-label="Video Player" on the <video>, which is useless as a title.
+function isGenericLabel(s) {
+  if (!s) return true;
+  const t = s.trim().toLowerCase();
+  return /^(video ?player|video|player|media ?player|html5 ?video|jw ?player|videojs|video element|untitled|loading|advertisement|ad)$/.test(t);
 }
 
 function twitterHandleFromHref(href) {
@@ -133,11 +142,12 @@ function collect() {
     if (vid.src) candidates.add(vid.src);
     vid.querySelectorAll('source').forEach((s) => { if (s.src) candidates.add(s.src); });
 
-    const poster = vid.poster && /^https?:/i.test(vid.poster) ? vid.poster : null;
+    const poster = posterForVideo(vid);
     const width = vid.videoWidth || (vid.width > 0 ? vid.width : null);
     const height = vid.videoHeight || (vid.height > 0 ? vid.height : null);
     const duration = Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : null;
-    const contextLabel = findContextForVideo(vid);
+    const rawContext = findContextForVideo(vid);
+    const contextLabel = isGenericLabel(rawContext) ? null : rawContext;
 
     for (const raw of candidates) {
       if (!raw || raw.startsWith('blob:') || raw.startsWith('data:')) continue;
@@ -157,8 +167,51 @@ function collect() {
   return items;
 }
 
+// Generic metadata scraper (top frame only): og:video tags and JSON-LD
+// VideoObject.contentUrl. Platform adapters handle the big social sites; this
+// is the long-tail fallback for news / blog / course pages that expose a clean
+// media URL in page metadata even before any <video> network request fires.
+function collectPageMeta() {
+  if (window !== window.top) return [];
+  const items = [];
+  const ogImg = document.querySelector('meta[property="og:image"]')?.getAttribute('content');
+  const poster = ogImg && /^https?:/i.test(ogImg) ? ogImg : null;
+  const kindOf = (u) => (/\.m3u8(\?|$)/i.test(u) ? 'hls' : /\.mpd(\?|$)/i.test(u) ? 'dash' : 'direct');
+  const looksMedia = (u) => /\.(mp4|m3u8|mpd|webm|mov|m4v)(\?|$)/i.test(u);
+  const add = (url, label) => {
+    if (!url || typeof url !== 'string' || !/^https?:\/\//i.test(url)) return;
+    if (url.startsWith('blob:') || seen.has(url)) return;
+    seen.add(url);
+    items.push({ url, label: label || filenameFromUrl(url), kind: kindOf(url), poster });
+  };
+
+  // og:video* — explicitly declared video, accept as-is.
+  for (const p of ['og:video', 'og:video:secure_url', 'og:video:url']) {
+    const v = document.querySelector(`meta[property="${p}"]`)?.getAttribute('content');
+    if (v) add(v, cleanContextText(document.title, 80));
+  }
+
+  // JSON-LD VideoObject — contentUrl can also be an image/page, so require it
+  // to look like a media file.
+  document.querySelectorAll('script[type="application/ld+json"]').forEach((el) => {
+    let data;
+    try { data = JSON.parse(el.textContent || 'null'); } catch { return; }
+    const walk = (node) => {
+      if (!node || typeof node !== 'object') return;
+      if (Array.isArray(node)) { node.forEach(walk); return; }
+      if (typeof node.contentUrl === 'string' && looksMedia(node.contentUrl)) {
+        add(node.contentUrl, typeof node.name === 'string' ? node.name : null);
+      }
+      Object.values(node).forEach(walk);
+    };
+    walk(data);
+  });
+
+  return items;
+}
+
 function report() {
-  const items = collect();
+  const items = [...collect(), ...collectPageMeta()];
   if (items.length === 0) return;
   try {
     chrome.runtime.sendMessage({
@@ -224,6 +277,72 @@ function inferFromUrl() {
   return null;
 }
 
+const IS_TOP_FRAME = window === window.top;
+
+// Best still-image we can find for a video. In priority order:
+//   1. the <video poster> attribute
+//   2. a large <img> poster-overlay inside the player container (most custom
+//      players, incl. Hotmart, paint the thumb as an <img> over the video)
+//   3. the page's og:image / twitter:image (in a bare player iframe this is
+//      usually the video thumbnail)
+function posterForVideo(videoEl) {
+  if (videoEl?.poster && /^https?:/i.test(videoEl.poster)) return videoEl.poster;
+
+  if (videoEl) {
+    const box = videoEl.getBoundingClientRect();
+    if (box.width > 40 && box.height > 40) {
+      const container =
+        videoEl.closest('[class*="player"], [class*="video"], figure, div') ||
+        videoEl.parentElement;
+      let best = null;
+      let bestArea = 0;
+      container?.querySelectorAll('img').forEach((img) => {
+        const src = img.currentSrc || img.src;
+        if (!src || !/^https?:/i.test(src)) return;
+        const r = img.getBoundingClientRect();
+        // Must cover most of the video box (a real poster), not a tiny icon.
+        if (r.width < box.width * 0.5 || r.height < box.height * 0.5) return;
+        const area = r.width * r.height;
+        if (area > bestArea) { bestArea = area; best = src; }
+      });
+      if (best) return best;
+    }
+  }
+
+  const og =
+    document.querySelector('meta[property="og:image"]')?.content ||
+    document.querySelector('meta[name="twitter:image"]')?.content;
+  if (og && /^https?:/i.test(og)) return og;
+  return null;
+}
+
+function videoMetadata(videoEl) {
+  if (!videoEl) return {};
+  const width = videoEl.videoWidth || null;
+  const height = videoEl.videoHeight || null;
+  const duration =
+    Number.isFinite(videoEl.duration) && videoEl.duration > 0
+      ? Math.round(videoEl.duration)
+      : null;
+  return { poster: posterForVideo(videoEl), duration, width, height };
+}
+
+let lastTitle = null;
+function broadcastPageTitle() {
+  // Only the top frame knows the real page/lecture title. Player iframes have
+  // a generic or empty title, so we don't broadcast theirs.
+  if (!IS_TOP_FRAME) return;
+  // Strip a trailing " | SiteName" / " · SiteName" suffix (common on course
+  // pages), but leave dashes alone — real titles often contain " - ".
+  const raw = document.title.replace(/\s*[|·]\s*[^|·]{1,40}$/, '');
+  const title = cleanContextText(raw, 100);
+  if (!title || title === lastTitle) return;
+  lastTitle = title;
+  try {
+    chrome.runtime.sendMessage({ type: 'page-title', title });
+  } catch (_) { /* extension context invalidated mid-navigation */ }
+}
+
 function updateActiveContext() {
   // Tier 1: <video> closest to viewport center
   const center = window.innerHeight / 2;
@@ -239,6 +358,7 @@ function updateActiveContext() {
   });
 
   let next = bestVideo ? findContextForVideo(bestVideo) : null;
+  if (isGenericLabel(next)) next = null; // e.g. "Video Player" — fall through
 
   // Tier 2: <article> closest to viewport center (Twitter renders these
   // even when their video isn't mounted yet)
@@ -247,12 +367,23 @@ function updateActiveContext() {
   // Tier 3: URL-pattern inference (handle/status/id, /reel/id, /@user, ...)
   if (!next) next = inferFromUrl();
 
-  if (next === activeContext) return;
+  if (isGenericLabel(next)) next = null;
+
+  // The poster/duration of the player video — even when we have no label —
+  // lets network-observed (MSE blob:) streams inherit a thumbnail + duration.
+  const meta = videoMetadata(bestVideo);
+
+  // Skip the message if nothing meaningful changed (scroll fires this often).
+  const sig = `${next}|${meta.poster}|${meta.duration}|${meta.width}x${meta.height}`;
+  if (sig === lastContextSig) return;
+  lastContextSig = sig;
   activeContext = next;
   try {
     chrome.runtime.sendMessage({
       type: 'active-context',
       label: activeContext,
+      frameTop: IS_TOP_FRAME,
+      ...meta,
     });
   } catch (_) { /* extension context invalidated mid-navigation */ }
 }
@@ -262,11 +393,13 @@ function scheduleUpdate(delay = 200) {
   updateTimer = setTimeout(() => {
     updateActiveContext();
     report();
+    broadcastPageTitle();
   }, delay);
 }
 
 report();
 updateActiveContext();
+broadcastPageTitle();
 
 window.addEventListener('scroll', () => scheduleUpdate(200), { passive: true, capture: true });
 

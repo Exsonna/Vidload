@@ -43,6 +43,52 @@ function sendStatus(payload) {
   chrome.runtime.sendMessage(payload).catch(() => {});
 }
 
+// Transmux concatenated MPEG-TS bytes into a real (fragmented) MP4 using mux.js
+// — same codecs (H.264/AAC), just a container rewrap, no re-encode. mux.js is
+// loaded as a classic script by offscreen.html and lives on globalThis.muxjs.
+// Returns an array of Uint8Array parts (init segment + media) on success.
+function transmuxTsToMp4(tsParts) {
+  return new Promise((resolve, reject) => {
+    const mux = globalThis.muxjs;
+    if (!mux?.mp4?.Transmuxer) {
+      reject(new Error('mux.js transmuxer unavailable'));
+      return;
+    }
+    let transmuxer;
+    try {
+      transmuxer = new mux.mp4.Transmuxer();
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    const out = [];
+    let init = null;
+    transmuxer.on('data', (seg) => {
+      if (!init && seg.initSegment) {
+        init = seg.initSegment;
+        out.push(seg.initSegment);
+      }
+      if (seg.data) out.push(seg.data);
+    });
+    transmuxer.on('done', () => {
+      const total = out.reduce((n, p) => n + (p?.byteLength || 0), 0);
+      if (!total) {
+        reject(new Error('transmux produced no output (unsupported codec?)'));
+        return;
+      }
+      resolve(out);
+    });
+    try {
+      for (const part of tsParts) {
+        transmuxer.push(part instanceof Uint8Array ? part : new Uint8Array(part));
+      }
+      transmuxer.flush();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 async function fetchWithTimeout(url, timeoutMs, options = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(new Error(`Fetch timed out after ${timeoutMs}ms`)), timeoutMs);
@@ -218,8 +264,27 @@ async function runHlsJob(jobId, playlistUrl, baseFilename, saveAs) {
 
   const totalSteps = (parsed.initSegment ? 1 : 0) + parsed.segments.length;
   const parts = await downloadSegments({ jobId, parsed, totalSteps, decryptor });
-  const ext = guessOutputExtension(parsed.segments, parsed.initSegment);
-  await finalize(jobId, parts, ext, baseFilename, totalSteps, saveAs);
+  let ext = guessOutputExtension(parsed.segments, parsed.initSegment);
+  let outParts = parts;
+
+  // MPEG-TS segments concatenate into a valid .ts, but users expect .mp4 and
+  // many players won't open .ts. Transmux to MP4 (no re-encode). Fall back to
+  // raw .ts if mux.js can't handle the codec, so the user still gets the video.
+  if (ext === 'ts') {
+    try {
+      sendStatus({ type: 'stream-progress', jobId, phase: 'remux', current: totalSteps, total: totalSteps });
+      log('transmuxing MPEG-TS → MP4');
+      outParts = await transmuxTsToMp4(parts);
+      ext = 'mp4';
+      log('transmux done');
+    } catch (err) {
+      warn('transmux failed, saving raw .ts instead:', err?.message || err);
+      outParts = parts;
+      ext = 'ts';
+    }
+  }
+
+  await finalize(jobId, outParts, ext, baseFilename, totalSteps, saveAs);
 }
 
 async function runDashJob(jobId, mpdUrl, baseFilename, saveAs) {

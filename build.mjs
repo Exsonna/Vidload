@@ -89,7 +89,7 @@ async function build(target) {
       matches: ['<all_urls>'],
       js: ['content/content-script.js'],
       run_at: 'document_idle',
-      all_frames: false,
+      all_frames: true, // detect <video> inside player iframes (Hotmart, Wistia, …)
     },
     ...cfg.adapters.map((name) => ADAPTERS[name].contentScript),
   ];

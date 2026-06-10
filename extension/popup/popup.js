@@ -61,11 +61,33 @@ let menuTarget = null; // { item, rowEl }
 
 const MIN_DIRECT_BYTES = 100 * 1024;
 
-const activeJobs = new Map();
+const activeJobs = new Map();   // jobId -> item url (routes live stream messages)
+const jobByUrl = new Map();      // item url -> { status, phase, current, total, error }
+const rowsByUrl = new Map();     // item url -> { dlBtn, progressEl, fillEl, textEl }
+
+// HLS dedup: a master playlist references variant + audio media playlists. Once
+// a probe reveals those child URLs, we hide any detected item that IS one of
+// them — collapsing master + variants + audio into the single master row.
+const hlsChildKeys = new Set();  // playlistKey(url) of known child playlists
+function playlistKey(url) {
+  try { const u = new URL(url); return u.origin + u.pathname; } catch { return url; }
+}
+let rerenderTimer = null;
+function scheduleRerender() {
+  if (rerenderTimer) return;
+  rerenderTimer = setTimeout(() => { rerenderTimer = null; render(); }, 150);
+}
 let allItems = [];
 let showHidden = false;
 const dismissed = new Set();
 let tierStatus = { monetizationEnabled: false, paid: true };
+
+// Generic player chrome ("Video Player" etc.) is not a real title — ignore it
+// so the page title / filename heuristics take over.
+function isGenericLabel(s) {
+  if (!s) return true;
+  return /^(video ?player|video|player|media ?player|html5 ?video|jw ?player|videojs|untitled|loading)$/i.test(s.trim());
+}
 
 // =============================================================================
 // User-data persistence (dismissed + renames). Single map in chrome.storage.local
@@ -128,6 +150,56 @@ function setDownloadButton(btn, text, opts = {}) {
   const label = btn.querySelector('.dl-label');
   if (label) label.textContent = text;
   btn.disabled = !!opts.disabled;
+}
+
+// =============================================================================
+// Per-row download progress UI (0–100% bar). Driven by stream-* messages and
+// restored from the SW job table when the popup reopens mid-download.
+// =============================================================================
+function showRowProgress(refs, job) {
+  if (!refs?.progressEl) return;
+  refs.progressEl.hidden = false;
+  const indeterminate = job.phase === 'manifest' || job.phase === 'save' || job.phase === 'remux';
+  refs.progressEl.classList.toggle('indeterminate', indeterminate);
+  if (indeterminate) {
+    if (refs.fillEl) refs.fillEl.style.width = '';
+    if (refs.textEl) {
+      refs.textEl.textContent =
+        job.phase === 'remux' ? 'Converting…' : job.phase === 'save' ? 'Finalizing…' : 'Reading…';
+    }
+  } else {
+    const pct = job.total > 0 ? Math.min(100, Math.round((job.current / job.total) * 100)) : 0;
+    if (refs.fillEl) refs.fillEl.style.width = `${pct}%`;
+    if (refs.textEl) refs.textEl.textContent = `${pct}%`;
+  }
+  setDownloadButton(refs.dlBtn, 'Downloading', { disabled: true });
+  if (refs.dlBtn) refs.dlBtn.title = '';
+}
+
+function hideRowProgress(refs) {
+  if (!refs?.progressEl) return;
+  refs.progressEl.hidden = true;
+  refs.progressEl.classList.remove('indeterminate');
+}
+
+// Apply a job's state to its row (if currently rendered). Also keeps jobByUrl
+// in sync so re-renders (dismiss/toggle) preserve the visible state.
+function applyJob(url, job) {
+  if (!url || !job) return;
+  jobByUrl.set(url, job);
+  const refs = rowsByUrl.get(url);
+  if (!refs) return;
+  if (job.status === 'active') {
+    showRowProgress(refs, job);
+  } else if (job.status === 'done') {
+    hideRowProgress(refs);
+    setDownloadButton(refs.dlBtn, 'Saved', { disabled: true });
+    if (refs.dlBtn) refs.dlBtn.title = '';
+  } else if (job.status === 'error') {
+    hideRowProgress(refs);
+    setDownloadButton(refs.dlBtn, 'Retry');
+    if (refs.dlBtn) refs.dlBtn.title = `Download failed: ${job.error || 'unknown error'}`;
+  }
 }
 
 function formatBytes(n) {
@@ -193,14 +265,16 @@ function looksLikeStreamSegment(item) {
 
 function isFilteredOut(item) {
   if (!item) return true;
+  // An HLS playlist that is a child (variant/audio) of a master we're already
+  // showing — collapse it into the master row.
+  if (item.kind === 'hls' && hlsChildKeys.has(playlistKey(item.url))) return true;
   if (item.kind !== 'direct') return false;
   if (item.source !== 'network') return false;
+  // .m4s / .ts are HLS/DASH sub-segments, never standalone videos. Hide them
+  // regardless of any duration/poster that got stamped on by context tracking.
+  if (looksLikeStreamSegment(item)) return true;
   if (hasMetadata(item)) return false;
   if (item.bytes != null && item.bytes < MIN_DIRECT_BYTES) return true;
-  // .m4s / .ts captured as standalone direct downloads are HLS/DASH sub-segments,
-  // not playable standalone videos. Without metadata (duration/poster/dims) there's
-  // no way to surface them usefully — hide unless the user opts into "show hidden".
-  if (looksLikeStreamSegment(item)) return true;
   return false;
 }
 
@@ -238,9 +312,13 @@ function extensionForItem(item) {
 function chooseTitle(item) {
   if (!item) return 'Unknown';
   if (item.userLabel) return item.userLabel;
-  if (item.contextLabel) return item.contextLabel;
+  if (item.contextLabel && !isGenericLabel(item.contextLabel)) return item.contextLabel;
   if (item.description) return item.description;
-  if (item.pageTitle && item.source !== 'network') return item.pageTitle;
+  // For network-detected streams (HLS/DASH from course/video sites) the page
+  // title is usually the real video name — far better than "Video on host".
+  if (item.pageTitle && (item.source !== 'network' || item.kind === 'hls' || item.kind === 'dash')) {
+    return item.pageTitle;
+  }
   if (looksLikeGibberish(item.label)) {
     const host = shortHost(item.url);
     return host ? `Video on ${host}` : `${(item.kind || 'video').toUpperCase()} stream`;
@@ -252,9 +330,9 @@ function chooseFilename(item) {
   if (!item) return `vidload-${Date.now()}.mp4`;
   if (item.userLabel) return ensureExtension(sanitizeFilename(item.userLabel), item);
   let base;
-  if (item.contextLabel) base = item.contextLabel;
+  if (item.contextLabel && !isGenericLabel(item.contextLabel)) base = item.contextLabel;
   else if (item.description) base = item.description.slice(0, 40);
-  else if (item.pageTitle && item.source !== 'network') base = item.pageTitle;
+  else if (item.pageTitle && (item.source !== 'network' || item.kind === 'hls' || item.kind === 'dash')) base = item.pageTitle;
   else {
     const host = shortHost(item.url).split('.')[0];
     base = `${host || 'video'}-${Date.now().toString(36).slice(-5)}`;
@@ -402,10 +480,17 @@ async function parseHlsMetadata(text, baseUrl) {
   let width = null;
   let height = null;
   let variants = [];
+  const childUrls = []; // media/audio playlists referenced by a master
 
   if (text.includes('#EXT-X-STREAM-INF')) {
     const lines = text.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
+      // Audio/subtitle renditions referenced by the master are children too.
+      if (lines[i].startsWith('#EXT-X-MEDIA')) {
+        const m = lines[i].match(/URI="([^"]+)"/);
+        if (m) { try { childUrls.push(new URL(m[1], baseUrl).href); } catch {} }
+        continue;
+      }
       if (!lines[i].startsWith('#EXT-X-STREAM-INF')) continue;
       const bwMatch = lines[i].match(/BANDWIDTH=(\d+)/);
       const resMatch = lines[i].match(/RESOLUTION=(\d+)x(\d+)/);
@@ -422,6 +507,7 @@ async function parseHlsMetadata(text, baseUrl) {
         width: resMatch ? parseInt(resMatch[1], 10) : null,
         height: resMatch ? parseInt(resMatch[2], 10) : null,
       });
+      childUrls.push(url);
     }
     if (variants.length === 0) return null;
     // Sort highest-quality first so [0] is the default pick.
@@ -431,7 +517,7 @@ async function parseHlsMetadata(text, baseUrl) {
     width = best.width;
     height = best.height;
     const res = await fetch(best.url, { credentials: 'include' });
-    if (!res.ok) return { duration: null, bandwidth, width, height, variants };
+    if (!res.ok) return { duration: null, bandwidth, width, height, variants, childUrls, isMaster: true };
     text = await res.text();
   }
 
@@ -441,7 +527,7 @@ async function parseHlsMetadata(text, baseUrl) {
     if (m) total += parseFloat(m[1]);
   }
   const duration = total > 0 ? Math.round(total) : null;
-  return { duration, bandwidth, width, height, variants };
+  return { duration, bandwidth, width, height, variants, childUrls, isMaster: variants.length > 0 };
 }
 
 function parseDashMetadata(mpdText) {
@@ -523,6 +609,15 @@ function maybeProbeMetadata(item, refs) {
         item.variants = meta.variants;
         if (refs.pickerEl?.isConnected) populateVariantPicker(item, refs.pickerEl);
       }
+      // Record this master's child playlists and collapse them out of the list.
+      if (meta.childUrls && meta.childUrls.length) {
+        let added = false;
+        for (const child of meta.childUrls) {
+          const key = playlistKey(child);
+          if (!hlsChildKeys.has(key)) { hlsChildKeys.add(key); added = true; }
+        }
+        if (added) scheduleRerender();
+      }
     })
     .catch((err) => console.debug('VidLoad: probe rejected', err?.message || err));
 }
@@ -595,6 +690,7 @@ function render() {
     showError('Cannot render — list or status element missing.');
     return;
   }
+  rowsByUrl.clear(); // rebuilt as rows are created below
   try {
     const filtered = allItems.filter((it) => it && !dismissed.has(it.url));
     const visible = showHidden ? filtered : filtered.filter((it) => !isFilteredOut(it));
@@ -744,6 +840,18 @@ function renderRow(item) {
   const dlBtn = node.querySelector('.dl');
   dlBtn?.addEventListener('click', () => startDownload(item, dlBtn));
 
+  // Register this row's download-progress refs so live + restored job state
+  // can drive its progress bar.
+  const progressEl = node.querySelector('.progress');
+  rowsByUrl.set(item.url, {
+    dlBtn,
+    progressEl,
+    fillEl: progressEl?.querySelector('.progress-fill'),
+    textEl: progressEl?.querySelector('.progress-text'),
+  });
+  const known = jobByUrl.get(item.url);
+  if (known) applyJob(item.url, known);
+
   listEl.appendChild(node);
 }
 
@@ -777,6 +885,7 @@ async function startDownload(item, btn, opts = {}) {
         type: 'download-stream',
         format: item.kind,
         url: streamUrl,
+        itemUrl: item.url, // canonical row key (variant URL may differ)
         filename,
         saveAs,
       });
@@ -791,7 +900,8 @@ async function startDownload(item, btn, opts = {}) {
         console.error('VidLoad stream start failed:', res?.error);
         return;
       }
-      activeJobs.set(res.jobId, { btn });
+      activeJobs.set(res.jobId, item.url);
+      applyJob(item.url, { status: 'active', phase: 'manifest', current: 0, total: 1 });
       refreshTier();
       return;
     }
@@ -823,29 +933,42 @@ async function startDownload(item, btn, opts = {}) {
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
-  if (!msg?.jobId || !activeJobs.has(msg.jobId)) return;
-  const { btn } = activeJobs.get(msg.jobId);
+  if (!msg?.jobId) return;
+  const url = activeJobs.get(msg.jobId);
+  if (!url) return; // not a job this popup is tracking
   if (msg.type === 'stream-progress') {
-    if (msg.phase === 'manifest') setDownloadButton(btn, 'Reading…', { disabled: true });
-    else if (msg.phase === 'save') setDownloadButton(btn, 'Finalizing…', { disabled: true });
-    else setDownloadButton(btn, `${msg.current}/${msg.total}`, { disabled: true });
-    if (btn) btn.title = '';
+    applyJob(url, { status: 'active', phase: msg.phase, current: msg.current, total: msg.total });
   } else if (msg.type === 'stream-done') {
-    setDownloadButton(btn, 'Saved', { disabled: true });
-    if (btn) btn.title = '';
+    applyJob(url, { status: 'done', filename: msg.filename });
     activeJobs.delete(msg.jobId);
   } else if (msg.type === 'stream-error') {
-    setDownloadButton(btn, 'Retry');
-    if (btn) btn.title = `Download failed: ${msg.error || 'unknown error'}`;
+    applyJob(url, { status: 'error', error: msg.error });
     console.error('VidLoad stream error:', msg.error);
     activeJobs.delete(msg.jobId);
   }
 });
 
+async function restoreJobs() {
+  // Re-attach to downloads that are still running (or just finished) in the
+  // background so reopening the popup shows live progress, not a fresh button.
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'get-jobs' });
+    const jobs = res?.jobs || {};
+    for (const [jobId, job] of Object.entries(jobs)) {
+      if (!job?.url) continue;
+      jobByUrl.set(job.url, job);
+      if (job.status === 'active') activeJobs.set(jobId, job.url);
+    }
+  } catch (err) {
+    console.debug('VidLoad: get-jobs failed', err?.message || err);
+  }
+}
+
 (async () => {
   try {
     await loadUserdata();
     await refreshTier();
+    await restoreJobs();
     const tabId = await getActiveTabId();
     if (tabId === undefined) {
       if (statusEl) statusEl.textContent = 'No active tab.';
