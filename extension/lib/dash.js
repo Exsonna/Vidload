@@ -22,11 +22,14 @@ export function parseDASH(text, baseUrl) {
   const periodBaseUrl = resolveUrl(directChildText(period, 'BaseURL'), mpdBaseUrl);
   const totalDurationSeconds = parseDurationSeconds(mpd.getAttribute('mediaPresentationDuration'));
 
-  let best = null;
+  let bestVideo = null;
+  let bestAudio = null;
   for (const set of period.getElementsByTagName('AdaptationSet')) {
     const ct = set.getAttribute('contentType');
     const mime = set.getAttribute('mimeType') || '';
-    if (ct !== 'video' && !mime.startsWith('video/')) continue;
+    const isVideo = ct === 'video' || mime.startsWith('video/');
+    const isAudio = ct === 'audio' || mime.startsWith('audio/');
+    if (!isVideo && !isAudio) continue;
 
     const setBaseUrl = resolveUrl(directChildText(set, 'BaseURL'), periodBaseUrl);
     const setSegmentTemplate = set.getElementsByTagName('SegmentTemplate')[0];
@@ -42,6 +45,10 @@ export function parseDASH(text, baseUrl) {
         parsed = fromSegmentTemplate(segmentTemplate, rep, repBaseUrl, totalDurationSeconds);
       } else if (segmentList) {
         parsed = fromSegmentList(segmentList, repBaseUrl);
+      } else if (repBaseUrl && /\.(mp4|m4s|m4a|webm)(\?|$)/i.test(repBaseUrl)) {
+        // SegmentBase / single-file representation (e.g. Reddit v.redd.it):
+        // the whole BaseURL file is a self-contained track. Download it whole.
+        parsed = { initSegment: null, segments: [{ uri: repBaseUrl }] };
       }
       if (!parsed) continue;
 
@@ -49,15 +56,22 @@ export function parseDASH(text, baseUrl) {
         bandwidth,
         width: parseInt(rep.getAttribute('width') || '0', 10),
         height: parseInt(rep.getAttribute('height') || '0', 10),
-        mimeType: rep.getAttribute('mimeType') || mime || 'video/mp4',
+        mimeType: rep.getAttribute('mimeType') || mime || (isAudio ? 'audio/mp4' : 'video/mp4'),
         ...parsed,
       };
-      if (!best || candidate.bandwidth > best.bandwidth) best = candidate;
+      if (isVideo) {
+        if (!bestVideo || candidate.bandwidth > bestVideo.bandwidth) bestVideo = candidate;
+      } else if (!bestAudio || candidate.bandwidth > bestAudio.bandwidth) {
+        bestAudio = candidate;
+      }
     }
   }
 
-  if (!best) throw new Error('No supported video Representation found in MPD');
-  return best;
+  if (!bestVideo) throw new Error('No supported video Representation found in MPD');
+  // Returns the video representation as the top-level shape (compatible with the
+  // HLS pipeline) plus a separate `audio` representation when the stream splits
+  // audio into its own AdaptationSet (common on adaptive streams). offscreen muxes the two.
+  return { ...bestVideo, audio: bestAudio };
 }
 
 function fromSegmentTemplate(tmpl, rep, baseUrl, totalDurationSeconds) {

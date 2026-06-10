@@ -301,7 +301,7 @@ function sanitizeFilename(s) {
 
 function extensionForItem(item) {
   if (!item) return '.mp4';
-  if (item.kind === 'hls' || item.kind === 'dash') return '';
+  if (item.kind === 'hls' || item.kind === 'dash' || item.kind === 'mux') return '';
   try {
     const m = new URL(item.url).pathname.match(VIDEO_EXT_RE);
     if (m) return '.' + m[1].toLowerCase();
@@ -562,6 +562,7 @@ function parseDashMetadata(mpdText) {
 }
 
 function variantLabel(v) {
+  if (v?.label) return v.label;
   if (v?.height) return qualityLabel(v.width, v.height) || `${v.height}p`;
   if (v?.bandwidth) return `${Math.round(v.bandwidth / 1000)}kbps`;
   return 'auto';
@@ -747,6 +748,12 @@ function renderRow(item) {
     if (item.kind) formatBadge.classList.add(item.kind);
   }
 
+  // Split-source (mux) items carry their qualities in videoVariants — reuse the
+  // variant picker for them.
+  if (item.kind === 'mux' && item.videoVariants && !item.variants) {
+    item.variants = item.videoVariants;
+  }
+
   const variantPicker = node.querySelector('.variant-picker');
   if (variantPicker) {
     if (item.variants && item.variants.length > 1) {
@@ -876,6 +883,37 @@ async function startDownload(item, btn, opts = {}) {
   setDownloadButton(btn, 'Saving…', { disabled: true });
   const filename = chooseFilename(item);
   try {
+    if (item.kind === 'mux') {
+      // Split video + audio sources (captured adaptive streams). Send the chosen
+      // video quality + its matching audio to be downloaded whole and muxed.
+      const variants = item.videoVariants || [];
+      const chosenUrl = item.selectedVariantUrl || variants[0]?.url;
+      const chosen = variants.find((v) => v.url === chosenUrl) || variants[0];
+      if (!chosen) {
+        setDownloadButton(btn, 'Retry');
+        if (btn) btn.title = 'No downloadable video stream captured yet — play the video first.';
+        return;
+      }
+      const audioUrl = chosen.hasAudio ? null : (item.audioUrl || null);
+      const res = await chrome.runtime.sendMessage({
+        type: 'download-av',
+        videoUrl: chosen.url,
+        audioUrl,
+        itemUrl: item.url,
+        filename,
+        saveAs,
+      });
+      if (res?.error === 'paywall') { setDownloadButton(btn, 'Download'); showPaywall(res); return; }
+      if (!res?.ok) {
+        setDownloadButton(btn, 'Retry');
+        if (btn) btn.title = `Download failed: ${res?.error || 'unknown error'}`;
+        return;
+      }
+      activeJobs.set(res.jobId, item.url);
+      applyJob(item.url, { status: 'active', phase: 'manifest', current: 0, total: 100 });
+      refreshTier();
+      return;
+    }
     if (item.kind === 'hls' || item.kind === 'dash') {
       // HLS variant picker: if the user chose a specific quality, pass that
       // variant's URL directly. offscreen.js will see a media playlist (no

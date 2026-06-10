@@ -43,14 +43,28 @@ const ADAPTERS = {
     },
   },
   youtube: {
-    file: 'adapters/youtube.js',
-    contentScript: {
-      matches: ['*://*.youtube.com/*'],
-      js: ['adapters/youtube.js'],
-      run_at: 'document_idle',
-    },
+    // Two files: the MAIN-world hook (captures the player's deciphered stream
+    // URLs, must run at document_start) + the isolated-world adapter.
+    files: ['adapters/youtube.js', 'adapters/youtube-hook.js'],
+    contentScripts: [
+      {
+        matches: ['*://*.youtube.com/*'],
+        js: ['adapters/youtube-hook.js'],
+        run_at: 'document_start',
+        world: 'MAIN',
+        all_frames: true,
+      },
+      {
+        matches: ['*://*.youtube.com/*'],
+        js: ['adapters/youtube.js'],
+        run_at: 'document_idle',
+      },
+    ],
   },
 };
+
+const adapterFiles = (a) => a.files || [a.file];
+const adapterContentScripts = (a) => a.contentScripts || [a.contentScript];
 
 const BUILDS = {
   webstore: {
@@ -69,8 +83,8 @@ async function build(target) {
   if (existsSync(outDir)) await rm(outDir, { recursive: true, force: true });
   await mkdir(outDir, { recursive: true });
 
-  const allAdapterFiles = Object.values(ADAPTERS).map((a) => a.file);
-  const includedAdapterFiles = cfg.adapters.map((name) => ADAPTERS[name].file);
+  const allAdapterFiles = Object.values(ADAPTERS).flatMap(adapterFiles);
+  const includedAdapterFiles = cfg.adapters.flatMap((name) => adapterFiles(ADAPTERS[name]));
   const excluded = allAdapterFiles.filter((f) => !includedAdapterFiles.includes(f));
 
   await cp(SRC, outDir, {
@@ -91,7 +105,7 @@ async function build(target) {
       run_at: 'document_idle',
       all_frames: true, // detect <video> inside player iframes (Hotmart, Wistia, …)
     },
-    ...cfg.adapters.map((name) => ADAPTERS[name].contentScript),
+    ...cfg.adapters.flatMap((name) => adapterContentScripts(ADAPTERS[name])),
   ];
   await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
 

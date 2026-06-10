@@ -5,9 +5,11 @@
     <title>VidLoad offscreen worker</title>
   </head>
   <body>
-    <!-- mux.js (Apache-2.0) — TS→fragmented-MP4 transmuxer. Classic script sets
-         window.muxjs before the module runs. See lib/mux.NOTICE. -->
+    <!-- mux.js (Apache-2.0) — TS→fragmented-MP4 transmuxer. See lib/mux.NOTICE. -->
     <script src="../lib/mux.min.js"></script>
+    <!-- mp4box.js (BSD-3/LGPL) — muxes separate video+audio into one MP4.
+         See lib/mp4box.NOTICE. Both classic scripts run before the module. -->
+    <script src="../lib/mp4box.min.js"></script>
     <script type="module" src="offscreen.js"></script>
   </body>
 </html>

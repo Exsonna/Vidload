@@ -35,6 +35,14 @@ chrome.runtime.onMessage.addListener((msg) => {
       warn('job failed', err);
       sendStatus({ type: 'stream-error', jobId: msg.jobId, error: String(err?.message || err) });
     });
+  } else if (msg.type === 'fetch-av') {
+    // Two complete media files (a video-only + optional audio-only) to download
+    // whole and mux into one MP4.
+    log('received fetch-av', { jobId: msg.jobId, hasAudio: !!msg.audioUrl, saveAs: !!msg.saveAs });
+    runMuxJob(msg.jobId, msg.videoUrl, msg.audioUrl, msg.filename, !!msg.saveAs).catch((err) => {
+      warn('mux job failed', err);
+      sendStatus({ type: 'stream-error', jobId: msg.jobId, error: String(err?.message || err) });
+    });
   }
   return false;
 });
@@ -130,8 +138,103 @@ async function fetchBytesWithRetry(url, retries = MAX_RETRIES) {
   throw new Error(`Failed after ${retries + 1} attempts: ${lastErr?.message || lastErr}`);
 }
 
-async function downloadSegments({ jobId, parsed, totalSteps, decryptor }) {
-  let completed = 0;
+// Combine an array of byte chunks into one ArrayBuffer tagged with fileStart=0,
+// which is what MP4Box.appendBuffer expects.
+function concatToFileBuffer(parts) {
+  let total = 0;
+  for (const p of parts) total += p.byteLength;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) { out.set(p, off); off += p.byteLength; }
+  const ab = out.buffer;
+  ab.fileStart = 0;
+  return ab;
+}
+
+// Mux a video-only stream and an audio-only stream (each a complete MP4, given
+// as an array of byte chunks) into one playable MP4 using mp4box.js. Container
+// remux only — no re-encode. The codec config is carried over by handing
+// addTrack the parsed description box (avcC for H.264, esds for AAC) straight
+// from the input, which mp4box adds to the output sample entry.
+function muxAvToMp4(videoParts, audioParts) {
+  return new Promise((resolve, reject) => {
+    const MP4Box = globalThis.MP4Box;
+    if (!MP4Box?.createFile) { reject(new Error('mp4box not loaded')); return; }
+
+    const out = MP4Box.createFile();
+    let pending = 2;
+    let settled = false;
+    const fail = (m) => { if (!settled) { settled = true; reject(new Error(m)); } };
+    const tryFinish = () => {
+      if (settled || pending > 0) return;
+      try {
+        const buf = out.getBuffer();
+        if (!buf || buf.byteLength < 1024) { fail('mux produced empty output'); return; }
+        settled = true;
+        resolve([new Uint8Array(buf)]);
+      } catch (e) { fail('mux getBuffer failed: ' + (e?.message || e)); }
+    };
+
+    const ingest = (parts, kind) => {
+      try {
+        const inFile = MP4Box.createFile();
+        inFile.onError = (e) => fail(`${kind} parse error: ${e}`);
+        inFile.onReady = (info) => {
+          try {
+            const t = ((kind === 'video' ? info.videoTracks : info.audioTracks) || [])[0]
+              || (info.tracks || [])[0];
+            if (!t) { fail(`no ${kind} track in stream`); return; }
+            const inTrak = inFile.getTrackById(t.id);
+            const entry = inTrak.mdia.minf.stbl.stsd.entries[0];
+            const cfg = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C || entry.esds || entry.dOps || null;
+            const opts = {
+              type: entry.type,
+              timescale: t.timescale,
+              duration: t.duration || 0,
+              language: t.language || 'und',
+              description: cfg,
+            };
+            if (kind === 'video') {
+              opts.width = (t.video && t.video.width) || t.track_width || 0;
+              opts.height = (t.video && t.video.height) || t.track_height || 0;
+            } else {
+              opts.channel_count = (t.audio && t.audio.channel_count) || 2;
+              opts.samplerate = (t.audio && t.audio.sample_rate) || t.timescale;
+              opts.samplesize = (t.audio && t.audio.sample_size) || 16;
+            }
+            const outId = out.addTrack(opts);
+            log(`mux ${kind} track`, { type: entry.type, hasConfig: !!cfg, outId });
+
+            let n = 0;
+            inFile.setExtractionOptions(t.id, null, { nbSamples: 10_000_000 });
+            inFile.onSamples = (id, user, samples) => {
+              for (const s of samples) {
+                out.addSample(outId, s.data, {
+                  duration: s.duration, cts: s.cts, dts: s.dts, is_sync: s.is_sync,
+                });
+                n += 1;
+              }
+            };
+            inFile.start();
+            inFile.flush();
+            log(`mux ${kind} samples`, n);
+            if (n === 0) { fail(`${kind} stream had no samples`); return; }
+            pending -= 1;
+            tryFinish();
+          } catch (e) { fail(`${kind} mux setup: ${e?.message || e}`); }
+        };
+        inFile.appendBuffer(concatToFileBuffer(parts));
+        inFile.flush();
+      } catch (e) { fail(`${kind} ingest: ${e?.message || e}`); }
+    };
+
+    ingest(videoParts, 'video');
+    if (!settled) ingest(audioParts, 'audio');
+  });
+}
+
+async function downloadSegments({ jobId, parsed, totalSteps, decryptor, startAt = 0 }) {
+  let completed = startAt;
   const tick = (detail) => {
     completed += 1;
     sendStatus({
@@ -287,6 +390,73 @@ async function runHlsJob(jobId, playlistUrl, baseFilename, saveAs) {
   await finalize(jobId, outParts, ext, baseFilename, totalSteps, saveAs);
 }
 
+// Download a complete media file, streaming so we can report progress.
+async function fetchFullWithProgress(url, onByte) {
+  const res = await fetchWithTimeout(url, SEGMENT_TIMEOUT_MS);
+  const total = parseInt(res.headers.get('content-length') || '0', 10) || 0;
+  if (!res.body) {
+    const buf = new Uint8Array(await res.arrayBuffer());
+    onByte(buf.byteLength, total || buf.byteLength);
+    return [buf];
+  }
+  const reader = res.body.getReader();
+  const chunks = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.byteLength;
+    onByte(received, total);
+  }
+  return chunks;
+}
+
+// Download a video-only stream and an optional audio-only stream (both complete
+// MP4 files), then mux them into one MP4. Used for adaptive sources that split
+// audio and video. If audioUrl is null the video already carries audio.
+async function runMuxJob(jobId, videoUrl, audioUrl, baseFilename, saveAs) {
+  log('mux job start', { jobId, hasAudio: !!audioUrl, saveAs: !!saveAs });
+  sendStatus({ type: 'stream-progress', jobId, phase: 'manifest', current: 0, total: 100 });
+
+  // Progress model: video download 0–55%, audio 55–85%, mux 85–95%, save 95–100.
+  const report = (pct) => sendStatus({ type: 'stream-progress', jobId, phase: 'segments', current: Math.round(pct), total: 100 });
+
+  let videoParts;
+  try {
+    videoParts = await fetchFullWithProgress(videoUrl, (r, t) => report(t ? (r / t) * 55 : 5));
+  } catch (err) {
+    throw new Error(`Could not download video stream: ${err.message}`);
+  }
+
+  if (!audioUrl) {
+    // Progressive (already-muxed) format — save the video as-is.
+    await finalize(jobId, videoParts, 'mp4', baseFilename, 100, saveAs);
+    return;
+  }
+
+  let audioParts;
+  try {
+    audioParts = await fetchFullWithProgress(audioUrl, (r, t) => report(55 + (t ? (r / t) * 30 : 5)));
+  } catch (err) {
+    warn('audio download failed, saving video-only:', err?.message || err);
+    await finalize(jobId, videoParts, 'mp4', baseFilename, 100, saveAs);
+    return;
+  }
+
+  sendStatus({ type: 'stream-progress', jobId, phase: 'remux', current: 90, total: 100 });
+  log('muxing captured video + audio → MP4');
+  let outParts;
+  try {
+    outParts = await muxAvToMp4(videoParts, audioParts);
+    log('mux done');
+  } catch (err) {
+    warn('mux failed, saving video-only:', err?.message || err);
+    outParts = videoParts;
+  }
+  await finalize(jobId, outParts, 'mp4', baseFilename, 100, saveAs);
+}
+
 async function runDashJob(jobId, mpdUrl, baseFilename, saveAs) {
   log('DASH job start', { jobId, mpdUrl, saveAs: !!saveAs });
   sendStatus({ type: 'stream-progress', jobId, phase: 'manifest', current: 0, total: 1 });
@@ -315,9 +485,37 @@ async function runDashJob(jobId, mpdUrl, baseFilename, saveAs) {
     detail: `${best.width}x${best.height} @ ${Math.round(best.bandwidth / 1000)}kbps`,
   });
 
-  const totalSteps = (best.initSegment ? 1 : 0) + best.segments.length;
-  const parts = await downloadSegments({ jobId, parsed: best, totalSteps });
-  await finalize(jobId, parts, 'mp4', baseFilename, totalSteps, saveAs);
+  const videoSteps = (best.initSegment ? 1 : 0) + best.segments.length;
+
+  // No separate audio track → the video stream is already muxed (or audio-less).
+  if (!best.audio) {
+    const parts = await downloadSegments({ jobId, parsed: best, totalSteps: videoSteps });
+    await finalize(jobId, parts, 'mp4', baseFilename, videoSteps, saveAs);
+    return;
+  }
+
+  // Separate audio AdaptationSet (Reddit, Facebook, and other adaptive streams): download
+  // both tracks, then mux into one MP4. The mux can't make a video-only file
+  // play with sound any other way.
+  log('DASH has separate audio track — will mux');
+  const audioSteps = (best.audio.initSegment ? 1 : 0) + best.audio.segments.length;
+  const totalSteps = videoSteps + audioSteps;
+  const videoParts = await downloadSegments({ jobId, parsed: best, totalSteps, startAt: 0 });
+  const audioParts = await downloadSegments({ jobId, parsed: best.audio, totalSteps, startAt: videoSteps });
+
+  sendStatus({ type: 'stream-progress', jobId, phase: 'remux', current: totalSteps, total: totalSteps });
+  log('muxing video + audio → MP4');
+  let outParts;
+  try {
+    outParts = await muxAvToMp4(videoParts, audioParts);
+    log('mux done');
+  } catch (err) {
+    // Last resort: save video-only so the user gets *something* (silent) rather
+    // than nothing, and we learn from the logged error.
+    warn('mux failed, saving video-only:', err?.message || err);
+    outParts = videoParts;
+  }
+  await finalize(jobId, outParts, 'mp4', baseFilename, totalSteps, saveAs);
 }
 
 function deriveFilename(label, ext) {

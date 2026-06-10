@@ -698,6 +698,43 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg?.type === 'download-av' && msg.videoUrl) {
+    // Separate video + (optional) audio source to download whole and mux.
+    (async () => {
+      const gate = await gateDownload();
+      if (!gate.allowed) {
+        sendResponse({ ok: false, error: 'paywall', ...gate });
+        return;
+      }
+      const jobId = makeJobId();
+      try {
+        await ensureOffscreenDocument();
+        setJob(jobId, {
+          url: msg.itemUrl || msg.videoUrl,
+          filename: msg.filename,
+          status: 'active',
+          phase: 'manifest',
+          current: 0,
+          total: 100,
+        }, { immediate: true });
+        chrome.runtime.sendMessage({
+          target: 'offscreen',
+          type: 'fetch-av',
+          jobId,
+          videoUrl: msg.videoUrl,
+          audioUrl: msg.audioUrl || null,
+          filename: msg.filename,
+          saveAs: !!msg.saveAs,
+        });
+        if (gate.metered) await bumpDownloadCount();
+        sendResponse({ ok: true, jobId });
+      } catch (err) {
+        sendResponse({ ok: false, error: String(err?.message || err) });
+      }
+    })();
+    return true;
+  }
+
   if (msg?.type === 'download-stream' && msg.url) {
     (async () => {
       const gate = await gateDownload();
