@@ -1,0 +1,14 @@
+mp4box.min.js is mp4box.js (the "all" build) by GPAC, vendored unmodified.
+
+Source:  https://github.com/gpac/mp4box.js  (npm: mp4box@0.5.2, dist/mp4box.all.min.js)
+License: BSD-3-Clause / LGPL dual license (https://github.com/gpac/mp4box.js/blob/master/LICENSE)
+
+Used by VidLoad's offscreen document to MUX a separate video-only stream and
+audio-only stream (DASH adaptation sets, adaptive streaming formats) into a
+single playable MP4 — a container remux, no re-encoding. Loaded as a packaged
+classic script (offscreen/offscreen.html); exposes globalThis.MP4Box. NOT
+fetched at runtime, so the extension ships no remote code.
+
+To update: download a new release from
+https://cdn.jsdelivr.net/npm/mp4box@<version>/dist/mp4box.all.min.js
+and overwrite lib/mp4box.min.js, then bump this NOTICE.
