@@ -1,0 +1,13 @@
+mux.min.js is mux.js v7.0.3 by Brightcove / video.js, vendored unmodified.
+
+Source:  https://github.com/videojs/mux.js
+License: Apache-2.0 (https://www.apache.org/licenses/LICENSE-2.0)
+
+Used by VidLoad's offscreen document to transmux MPEG-TS HLS segments into a
+fragmented MP4 container (no re-encoding). Loaded as a packaged classic script
+(offscreen/offscreen.html) — it is NOT fetched at runtime, so the extension
+ships no remote code.
+
+To update: download a new release from
+https://cdn.jsdelivr.net/npm/mux.js@<version>/dist/mux.min.js
+and overwrite lib/mux.min.js, then bump this NOTICE.
