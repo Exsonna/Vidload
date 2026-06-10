@@ -40,6 +40,7 @@ window.addEventListener('unhandledrejection', (ev) => {
 const listEl = document.getElementById('list');
 const statusEl = document.getElementById('status');
 const tierBadgeEl = document.getElementById('tier-badge');
+const trialBannerEl = document.getElementById('trial-banner');
 const tpl = document.getElementById('row-template');
 const toggleEl = document.getElementById('toggle-hidden');
 const paywallEl = document.getElementById('paywall');
@@ -623,6 +624,60 @@ function maybeProbeMetadata(item, refs) {
     .catch((err) => console.debug('VidLoad: probe rejected', err?.message || err));
 }
 
+// =============================================================================
+// Free-trial countdown banner (top of popup). Ticks every second while open.
+// =============================================================================
+let trialTimer = null;
+
+function formatCountdown(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (d > 0) return `${d}d ${h}h ${m}m ${sec}s`;
+  if (h > 0) return `${h}h ${m}m ${sec}s`;
+  return `${m}m ${sec}s`;
+}
+
+function renderTrialBanner(status) {
+  if (!trialBannerEl) return;
+  if (trialTimer) { clearInterval(trialTimer); trialTimer = null; }
+  const textEl = trialBannerEl.querySelector('.trial-banner-text');
+
+  // Nothing to show when monetization is off or the user has already paid.
+  if (!status?.monetizationEnabled || status.paid) {
+    trialBannerEl.hidden = true;
+    return;
+  }
+
+  if (status.trialActive && status.trialEndsAt) {
+    trialBannerEl.hidden = false;
+    trialBannerEl.className = 'trial';
+    const tick = () => {
+      const ms = status.trialEndsAt - Date.now();
+      if (ms <= 0) {
+        clearInterval(trialTimer);
+        trialTimer = null;
+        renderTrialBanner({ ...status, trialActive: false });
+        return;
+      }
+      if (textEl) textEl.textContent = `✨ Free trial — ${formatCountdown(ms)} left · unlimited downloads`;
+    };
+    tick();
+    trialTimer = setInterval(tick, 1000);
+  } else {
+    // Trial over → nudge to upgrade. Click opens the paywall.
+    trialBannerEl.hidden = false;
+    trialBannerEl.className = 'ended';
+    if (textEl) textEl.textContent = '⏳ Free trial ended — tap to upgrade for unlimited downloads';
+  }
+}
+
+trialBannerEl?.addEventListener('click', () => {
+  if (trialBannerEl.classList.contains('ended')) showPaywall(tierStatus);
+});
+
 function renderTier(status) {
   if (!tierBadgeEl) return;
   tierStatus = status || tierStatus;
@@ -870,7 +925,7 @@ toggleEl?.addEventListener('click', () => {
 async function refreshTier() {
   try {
     const status = await chrome.runtime.sendMessage({ type: 'get-status' });
-    if (status) renderTier(status);
+    if (status) { renderTier(status); renderTrialBanner(status); }
     return status;
   } catch (err) {
     console.debug('VidLoad: get-status failed', err?.message || err);

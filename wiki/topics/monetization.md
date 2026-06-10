@@ -65,17 +65,22 @@ Counter increments after each successful `chrome.downloads.download()` call (or 
 
 On midnight local time the date check triggers a reset to 0.
 
-## Trial timer
+## Trial timer (v0.4.23 rewrite — reset-id based)
 
-Stored separately in `chrome.storage.local` under `vidload_install_ts`:
+Stored in `chrome.storage.local`:
 
 ```js
-{ vidload_install_ts: 1747353600000 }  // ms epoch
+{ vidload_trial_start: 1749600000000,   // ms epoch — when this trial began
+  vidload_trial_reset: 'reliability-2026-06' }  // which grant id is applied
 ```
 
-Written exactly once, on `chrome.runtime.onInstalled` with `details.reason === 'install'`. Subsequent updates leave it untouched so we don't reset trial time when the extension auto-updates from the Web Store. Uninstall + reinstall = fresh trial (matches the ExtPay paid-status persistence semantics — `paid` survives reinstall via the per-extension user ID, but the trial timer doesn't).
+`getTrialStatus()` lazily starts (or re-starts) the trial. On each call, if **no trial has started yet** OR the stored `vidload_trial_reset` differs from `MONETIZATION.trialResetId`, it sets `vidload_trial_start = now` and records the new reset id. So:
 
-`getTrialStatus()` returns `{ active, daysLeft }`. If `enabled = false` or `installTs` missing, falls back to `{ active: true, daysLeft: trialDays }` (generous default — easier to err on the side of letting users in than locking them out on edge cases).
+- The clock starts the **first time monetization is active** for a user (not at install) — i.e. when you flip `enabled = true` and ship, everyone gets a clean `trialDays` from that moment.
+- **To grant every user another fresh trial** (e.g. "we fixed major bugs, here's another week"), just **bump `MONETIZATION.trialResetId`** to a new string and ship. Each user re-grants exactly once per new id, on their next popup open / download. Current value `reliability-2026-06` re-grants for the v0.4.14–v0.4.22 overhaul.
+- Paid users never reach this — `isPaid()` short-circuits `gateDownload()`.
+
+`getTrialStatus()` returns `{ active, daysLeft, endsAt, msLeft }`. `endsAt` drives the popup's live **countdown header** (`#trial-banner`), which ticks every second while the popup is open and flips to a tap-to-upgrade banner when the trial ends.
 
 ## Configuration toggle
 
@@ -83,9 +88,10 @@ Written exactly once, on `chrome.runtime.onInstalled` with `details.reason === '
 
 ```js
 const MONETIZATION = {
-  enabled: false,                    // master switch
+  enabled: false,                    // master switch — flip after ExtPay setup
   extpayId: 'vidload',               // from extensionpay.com dashboard
-  trialDays: 7,                      // free-trial length on fresh install
+  trialDays: 7,                      // free-trial length
+  trialResetId: 'reliability-2026-06', // bump to re-grant everyone a fresh trial
   freeDailyLimit: 3,                 // downloads/day after the trial expires
   priceLabel: '$4.99 one-time',
 };

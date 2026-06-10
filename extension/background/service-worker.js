@@ -141,7 +141,12 @@ chrome.runtime.onStartup.addListener(() => setupRefererRules());
 const MONETIZATION = {
   enabled: false,                    // flip to true once ExtPay is configured
   extpayId: 'vidload',               // replace with your extensionpay.com id
-  trialDays: 7,                      // free-trial length on fresh install
+  trialDays: 7,                      // free-trial length
+  // Bump this string to grant EVERY user a fresh `trialDays` trial — e.g. after
+  // shipping major fixes ("here's another week on us"). Each user re-grants
+  // once per new id, on their next status check. Current value re-grants for
+  // the v0.4.14–v0.4.22 reliability overhaul.
+  trialResetId: 'reliability-2026-06',
   freeDailyLimit: 3,                 // downloads/day after the trial expires
   priceLabel: '$4.99 one-time',      // shown in the paywall UI
 };
@@ -156,20 +161,9 @@ if (MONETIZATION.enabled && typeof ExtPay === 'function') {
 }
 
 const DOWNLOAD_COUNTER_KEY = 'vidload_downloads';
-const INSTALL_TS_KEY = 'vidload_install_ts';
+const TRIAL_START_KEY = 'vidload_trial_start';
+const TRIAL_RESET_KEY = 'vidload_trial_reset';
 const DAY_MS = 86_400_000;
-
-// Trial timer starts on first install — not on update — so existing users keep
-// any time they had left if we later update the build.
-chrome.runtime.onInstalled.addListener(async (details) => {
-  if (details.reason !== 'install') return;
-  try {
-    await chrome.storage.local.set({ [INSTALL_TS_KEY]: Date.now() });
-    console.log(`[VidLoad] Free trial started (${MONETIZATION.trialDays}d)`);
-  } catch (err) {
-    console.error('[VidLoad] Failed to record install timestamp', err);
-  }
-});
 
 function todayKey() {
   return new Date().toISOString().slice(0, 10);
@@ -205,18 +199,30 @@ async function isPaid() {
   }
 }
 
+// The trial clock starts the first time monetization is active for a user, and
+// re-starts whenever MONETIZATION.trialResetId changes (a "free trial for
+// everyone" grant after major fixes). Stored in chrome.storage.local so it
+// survives SW restarts. Paid users never reach this — isPaid() short-circuits.
 async function getTrialStatus() {
-  if (!MONETIZATION.enabled) return { active: false, daysLeft: 0 };
-  const stored = await chrome.storage.local.get(INSTALL_TS_KEY);
-  const installTs = stored[INSTALL_TS_KEY];
-  // No recorded timestamp = either onInstalled hasn't fired yet (first run
-  // race) or storage was wiped. Treat as fresh trial — generous fallback
-  // because the alternative (denying trial) feels punitive.
-  if (!installTs) return { active: true, daysLeft: MONETIZATION.trialDays };
-  const elapsed = Date.now() - installTs;
-  const total = MONETIZATION.trialDays * DAY_MS;
-  if (elapsed >= total) return { active: false, daysLeft: 0 };
-  return { active: true, daysLeft: Math.max(1, Math.ceil((total - elapsed) / DAY_MS)) };
+  if (!MONETIZATION.enabled) return { active: false, daysLeft: 0, endsAt: 0, msLeft: 0 };
+  const stored = await chrome.storage.local.get([TRIAL_START_KEY, TRIAL_RESET_KEY]);
+  let start = stored[TRIAL_START_KEY];
+  if (!start || stored[TRIAL_RESET_KEY] !== MONETIZATION.trialResetId) {
+    start = Date.now();
+    try {
+      await chrome.storage.local.set({
+        [TRIAL_START_KEY]: start,
+        [TRIAL_RESET_KEY]: MONETIZATION.trialResetId,
+      });
+      console.log(`[VidLoad] Free trial granted (${MONETIZATION.trialDays}d, id=${MONETIZATION.trialResetId})`);
+    } catch (err) {
+      console.error('[VidLoad] trial start write failed', err);
+    }
+  }
+  const endsAt = start + MONETIZATION.trialDays * DAY_MS;
+  const msLeft = endsAt - Date.now();
+  if (msLeft <= 0) return { active: false, daysLeft: 0, endsAt, msLeft: 0 };
+  return { active: true, daysLeft: Math.max(1, Math.ceil(msLeft / DAY_MS)), endsAt, msLeft };
 }
 
 async function gateDownload() {
@@ -593,6 +599,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         trialActive: trial.active,
         trialDaysLeft: trial.daysLeft,
         trialTotalDays: MONETIZATION.trialDays,
+        trialEndsAt: trial.endsAt || 0,
+        trialMsLeft: trial.msLeft || 0,
         limit: MONETIZATION.freeDailyLimit,
         used: data.count,
         priceLabel: MONETIZATION.priceLabel,
