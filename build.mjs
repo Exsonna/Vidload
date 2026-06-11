@@ -100,6 +100,13 @@ async function build(target) {
   manifest.description = cfg.description;
   manifest.content_scripts = [
     {
+      // ExtensionPay: relays paid status from the payment page back to the
+      // extension. Required by ExtPay in both builds.
+      matches: ['https://extensionpay.com/*'],
+      js: ['lib/extpay.js'],
+      run_at: 'document_start',
+    },
+    {
       matches: ['<all_urls>'],
       js: ['content/content-script.js'],
       run_at: 'document_idle',

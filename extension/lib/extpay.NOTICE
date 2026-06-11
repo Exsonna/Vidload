@@ -1,0 +1,16 @@
+extpay.js is the ExtensionPay SDK (ExtPay.js) by Glench, vendored unmodified.
+
+Source:  https://github.com/Glench/ExtPay  (npm: extpay, dist/ExtPay.js)
+License: ISC
+
+Used for monetization: the $4.99 one-time unlock + paid-status checks. Loaded
+three ways from the one file:
+  - service worker:  importScripts('/lib/extpay.js')  → ExtPay('vidload').startBackground()
+  - extensionpay.com content script (relays paid status back to the extension)
+  - (popup talks to the SW, which owns the ExtPay instance)
+
+extpayId is 'vidload' — must match the Extension ID registered at
+extensionpay.com. NOT fetched at runtime → no remote code.
+
+To update: download a fresh dist/ExtPay.js from the repo and overwrite this
+file, keeping the path/filename so the manifest references still resolve.

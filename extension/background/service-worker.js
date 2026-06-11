@@ -139,8 +139,8 @@ chrome.runtime.onStartup.addListener(() => setupRefererRules());
 // Monetization configuration — see wiki/topics/monetization.md
 // =============================================================================
 const MONETIZATION = {
-  enabled: false,                    // flip to true once ExtPay is configured
-  extpayId: 'vidload',               // replace with your extensionpay.com id
+  enabled: true,                     // LIVE — ExtPay configured (extpayId below)
+  extpayId: 'vidload',               // matches the Extension ID at extensionpay.com
   trialDays: 7,                      // free-trial length
   // Bump this string to grant EVERY user a fresh `trialDays` trial — e.g. after
   // shipping major fixes ("here's another week on us"). Each user re-grants

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "VidLoad",
-  "version": "0.4.23",
+  "version": "0.4.24",
   "description": "Save videos from any webpage to your computer.",
   "permissions": ["downloads", "storage", "webRequest", "offscreen", "declarativeNetRequestWithHostAccess"],
   "host_permissions": ["<all_urls>"],
@@ -27,6 +27,11 @@
     "service_worker": "background/service-worker.js"
   },
   "content_scripts": [
+    {
+      "matches": ["https://extensionpay.com/*"],
+      "js": ["lib/extpay.js"],
+      "run_at": "document_start"
+    },
     {
       "matches": ["<all_urls>"],
       "js": ["content/content-script.js"],
