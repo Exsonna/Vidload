@@ -48,6 +48,7 @@ const paywallDetailEl = document.getElementById('paywall-detail');
 const paywallPriceEl = document.getElementById('paywall-price');
 const paywallFootEl = document.getElementById('paywall-foot');
 const upgradeBtn = document.getElementById('upgrade-btn');
+const upgradeLinkEl = document.getElementById('upgrade-link');
 const paywallBackBtn = document.getElementById('paywall-back');
 const footerEl = document.querySelector('footer');
 const menuEl = document.getElementById('row-menu');
@@ -681,6 +682,9 @@ trialBannerEl?.addEventListener('click', () => {
 function renderTier(status) {
   if (!tierBadgeEl) return;
   tierStatus = status || tierStatus;
+  // Upgrade link: visible whenever monetization is on and the user hasn't paid
+  // (during the trial AND the free tier) so keen users can buy any time.
+  if (upgradeLinkEl) upgradeLinkEl.hidden = !(status?.monetizationEnabled && !status.paid);
   if (!status?.monetizationEnabled) {
     tierBadgeEl.hidden = true;
     return;
@@ -726,18 +730,21 @@ function hidePaywall() {
   if (footerEl) footerEl.hidden = false;
 }
 
-upgradeBtn?.addEventListener('click', async () => {
+async function openPaymentPage() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'open-payment-page' });
     if (!res?.ok) {
       if (paywallFootEl) paywallFootEl.textContent = res?.error || 'Could not open payment page.';
       return;
     }
-    window.close();
+    window.close(); // ExtPay checkout opens in its own tab
   } catch (err) {
     showError(`Upgrade click failed: ${err?.message || err}`);
   }
-});
+}
+
+upgradeBtn?.addEventListener('click', openPaymentPage);
+upgradeLinkEl?.addEventListener('click', openPaymentPage);
 
 paywallBackBtn?.addEventListener('click', () => hidePaywall());
 
