@@ -16,6 +16,10 @@ export function parseM3U8(text, baseUrl) {
   let pendingDuration = null;
   let pendingByteRange = null;
   let currentKey = null;
+  // Track the running end offset per resource URI so a bare BYTERANGE length
+  // (no @offset) resolves to the byte after the previous sub-range of the same
+  // URI, per RFC 8216 §4.4.4.2.
+  const byteRangeCursor = new Map();
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -50,7 +54,11 @@ export function parseM3U8(text, baseUrl) {
     if (line.startsWith('#EXT-X-MAP')) {
       const attrs = parseAttrs(line);
       if (attrs.URI) {
-        result.initSegment = { uri: resolveUrl(attrs.URI, baseUrl) };
+        const uri = resolveUrl(attrs.URI, baseUrl);
+        result.initSegment = {
+          uri,
+          byteRange: resolveByteRange(attrs.BYTERANGE, uri, byteRangeCursor),
+        };
       }
       continue;
     }
@@ -90,10 +98,11 @@ export function parseM3U8(text, baseUrl) {
     if (line.startsWith('#')) continue;
 
     if (pendingDuration !== null) {
+      const uri = resolveUrl(line, baseUrl);
       result.segments.push({
-        uri: resolveUrl(line, baseUrl),
+        uri,
         duration: pendingDuration,
-        byteRange: pendingByteRange,
+        byteRange: resolveByteRange(pendingByteRange, uri, byteRangeCursor),
         sequence: result.mediaSequence + result.segments.length,
         key: currentKey,
       });
@@ -103,6 +112,20 @@ export function parseM3U8(text, baseUrl) {
   }
 
   return result;
+}
+
+// Parse a "#EXT-X-BYTERANGE:LENGTH[@OFFSET]" value into { offset, length }.
+// When @OFFSET is omitted, it's the byte immediately after the previous
+// sub-range of the same resource URI. Returns null for absent/malformed input.
+function resolveByteRange(raw, uri, cursor) {
+  if (!raw) return null;
+  const m = String(raw).trim().match(/^(\d+)(?:@(\d+))?$/);
+  if (!m) return null;
+  const length = parseInt(m[1], 10);
+  if (!Number.isFinite(length) || length <= 0) return null;
+  const offset = m[2] != null ? parseInt(m[2], 10) : (cursor.get(uri) || 0);
+  cursor.set(uri, offset + length);
+  return { offset, length };
 }
 
 function parseAttrs(line) {
@@ -155,10 +178,18 @@ export async function decryptSegment(cipherBuf, cryptoKey, iv) {
 }
 
 export function parseHexIV(hex) {
-  const clean = (hex || '').replace(/^0x/i, '').padStart(32, '0');
+  const clean = (hex || '').replace(/^0x/i, '');
+  // Validate hex up front. Previously a non-hex pair silently became 0x00 via
+  // `|| 0`, producing a wrong-but-plausible IV and a corrupt segment reported
+  // as success. Fail loudly instead. Short (but hex) IVs are left-padded, as
+  // AES-128 IVs are 128-bit big-endian.
+  if (!/^[0-9a-fA-F]{1,32}$/.test(clean)) {
+    throw new Error(`Invalid AES-128 IV: ${hex}`);
+  }
+  const padded = clean.padStart(32, '0');
   const out = new Uint8Array(16);
   for (let i = 0; i < 16; i++) {
-    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16) || 0;
+    out[i] = parseInt(padded.slice(i * 2, i * 2 + 2), 16);
   }
   return out;
 }

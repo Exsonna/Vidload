@@ -6,6 +6,10 @@
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
+    <div id="youtube-notice" hidden>
+      <strong>YouTube isn't supported here.</strong>
+      The Chrome Web Store doesn't allow extensions to download YouTube videos, so this version can't include it.
+    </div>
     <div id="trial-banner" hidden><span class="trial-banner-text"></span></div>
     <header>
       <div class="header-row">
@@ -83,7 +87,7 @@
               <svg class="dl-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
               <span class="dl-label">Download</span>
             </button>
-            <button class="more" type="button" title="Copy URL" aria-label="More actions">
+            <button class="more" type="button" title="More actions" aria-label="More actions" aria-haspopup="menu" aria-expanded="false">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
             </button>
           </div>
@@ -94,6 +98,8 @@
         </div>
       </li>
     </template>
+    <script src="../lib/media-url.js"></script>
     <script src="popup.js"></script>
+    <script src="youtube-notice.js"></script>
   </body>
 </html>

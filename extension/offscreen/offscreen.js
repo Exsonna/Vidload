@@ -17,6 +17,12 @@ import { parseDASH } from '../lib/dash.js';
 
 const MAX_PARALLEL_FETCHES = 5;
 const MAX_RETRIES = 2;
+// Everything is assembled in memory (segments + concat + transmux + Blob), so a
+// very large stream can exhaust the offscreen document's heap. Abort with a
+// clear message instead of dying with an opaque RangeError near 100%.
+const MAX_TOTAL_BYTES = 2_000_000_000; // ~2 GB
+const tooLargeError = () =>
+  new Error(`Video too large to assemble in memory (over ${Math.round(MAX_TOTAL_BYTES / 1e9)} GB). Try a lower quality if available.`);
 const REVOKE_DELAY_MS = 60_000;
 const PLAYLIST_TIMEOUT_MS = 30_000;
 const SEGMENT_TIMEOUT_MS = 60_000;
@@ -97,19 +103,29 @@ function transmuxTsToMp4(tsParts) {
   });
 }
 
+// options may carry `headers` (e.g. a Range request) and an external `signal`
+// (job-wide cancellation). We combine the external signal with our own timeout
+// controller so either can abort the fetch.
 async function fetchWithTimeout(url, timeoutMs, options = {}) {
+  const { signal: extSignal, ...rest } = options;
   const ctrl = new AbortController();
+  const onExtAbort = () => ctrl.abort(extSignal?.reason);
+  if (extSignal) {
+    if (extSignal.aborted) ctrl.abort(extSignal.reason);
+    else extSignal.addEventListener('abort', onExtAbort, { once: true });
+  }
   const timer = setTimeout(() => ctrl.abort(new Error(`Fetch timed out after ${timeoutMs}ms`)), timeoutMs);
   try {
     const res = await fetch(url, {
       credentials: 'include',
+      ...rest,
       signal: ctrl.signal,
-      ...options,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText} — ${url}`);
     return res;
   } finally {
     clearTimeout(timer);
+    if (extSignal) extSignal.removeEventListener('abort', onExtAbort);
   }
 }
 
@@ -119,18 +135,20 @@ async function fetchText(url) {
   return res.text();
 }
 
-async function fetchBytes(url) {
-  const res = await fetchWithTimeout(url, SEGMENT_TIMEOUT_MS);
+async function fetchBytes(url, options = {}) {
+  const res = await fetchWithTimeout(url, SEGMENT_TIMEOUT_MS, options);
   return new Uint8Array(await res.arrayBuffer());
 }
 
-async function fetchBytesWithRetry(url, retries = MAX_RETRIES) {
+async function fetchBytesWithRetry(url, retries = MAX_RETRIES, options = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    if (options.signal?.aborted) throw new Error('cancelled');
     try {
-      return await fetchBytes(url);
+      return await fetchBytes(url, options);
     } catch (err) {
       lastErr = err;
+      if (options.signal?.aborted) throw err; // job cancelled — don't keep retrying
       warn(`fetch attempt ${attempt + 1}/${retries + 1} failed: ${err.message}`);
       if (attempt < retries) await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
     }
@@ -247,32 +265,48 @@ async function downloadSegments({ jobId, parsed, totalSteps, decryptor, startAt 
     });
   };
 
+  // Job-wide cancellation: when one worker fails (or we blow the memory ceiling)
+  // abort the rest instead of letting them keep fetching for a doomed job.
+  const ctrl = new AbortController();
+  let totalBytes = 0;
+  const account = (n) => {
+    totalBytes += n;
+    if (totalBytes > MAX_TOTAL_BYTES) { ctrl.abort(); throw tooLargeError(); }
+  };
+
   const parts = [];
   if (parsed.initSegment) {
     log('fetching init segment', parsed.initSegment.uri);
-    parts.push(await fetchBytesWithRetry(parsed.initSegment.uri));
+    const initBytes = await fetchBytesWithRetry(parsed.initSegment.uri, MAX_RETRIES, rangeOptions(parsed.initSegment, ctrl.signal));
+    account(initBytes.byteLength);
+    parts.push(initBytes);
     tick('init segment');
   }
 
   const buffers = new Array(parsed.segments.length);
   let nextIdx = 0;
   async function worker() {
-    while (true) {
+    while (!ctrl.signal.aborted) {
       const idx = nextIdx++;
       if (idx >= parsed.segments.length) return;
       const seg = parsed.segments[idx];
-      let bytes = await fetchBytesWithRetry(seg.uri);
+      let bytes = await fetchBytesWithRetry(seg.uri, MAX_RETRIES, rangeOptions(seg, ctrl.signal));
       if (decryptor) bytes = await decryptor(bytes, seg);
+      account(bytes.byteLength);
       buffers[idx] = bytes;
       tick(`segment ${idx + 1}/${parsed.segments.length}`);
     }
   }
+  const runWorker = async () => {
+    try { await worker(); }
+    catch (err) { ctrl.abort(); throw err; } // first failure cancels siblings
+  };
 
   log(`starting ${Math.min(MAX_PARALLEL_FETCHES, parsed.segments.length)} parallel workers for ${parsed.segments.length} segments`);
   await Promise.all(
     Array.from(
       { length: Math.min(MAX_PARALLEL_FETCHES, parsed.segments.length) },
-      () => worker()
+      () => runWorker()
     )
   );
   log('all segments fetched');
@@ -281,7 +315,19 @@ async function downloadSegments({ jobId, parsed, totalSteps, decryptor, startAt 
   return parts;
 }
 
-async function finalize(jobId, parts, ext, baseFilename, totalSteps, saveAs) {
+// Build fetch options for a segment: the job-wide abort signal plus, for a
+// byte-range segment (a single-file HLS resource sliced by #EXT-X-BYTERANGE),
+// the Range header so we fetch only that slice instead of the whole file.
+function rangeOptions(seg, signal) {
+  const opts = { signal };
+  if (seg?.byteRange) {
+    const { offset, length } = seg.byteRange;
+    opts.headers = { Range: `bytes=${offset}-${offset + length - 1}` };
+  }
+  return opts;
+}
+
+async function finalize(jobId, parts, ext, baseFilename, totalSteps, saveAs, warning = null) {
   const blob = new Blob(parts, { type: ext === 'mp4' ? 'video/mp4' : 'video/mp2t' });
   const blobUrl = URL.createObjectURL(blob);
   const finalName = deriveFilename(baseFilename, ext);
@@ -311,8 +357,8 @@ async function finalize(jobId, parts, ext, baseFilename, totalSteps, saveAs) {
     throw new Error(result?.error || 'commit-download failed');
   }
   setTimeout(() => URL.revokeObjectURL(blobUrl), REVOKE_DELAY_MS);
-  log('download started', { downloadId: result.downloadId, finalName });
-  sendStatus({ type: 'stream-done', jobId, filename: finalName, downloadId: result.downloadId, bytes: blob.size });
+  log('download started', { downloadId: result.downloadId, finalName, warning: warning || undefined });
+  sendStatus({ type: 'stream-done', jobId, filename: finalName, downloadId: result.downloadId, bytes: blob.size, warning });
 }
 
 async function runHlsJob(jobId, playlistUrl, baseFilename, saveAs) {
@@ -407,6 +453,10 @@ async function fetchFullWithProgress(url, onByte) {
     if (done) break;
     chunks.push(value);
     received += value.byteLength;
+    if (received > MAX_TOTAL_BYTES) {
+      try { await reader.cancel(); } catch {}
+      throw tooLargeError();
+    }
     onByte(received, total);
   }
   return chunks;
@@ -440,21 +490,23 @@ async function runMuxJob(jobId, videoUrl, audioUrl, baseFilename, saveAs) {
     audioParts = await fetchFullWithProgress(audioUrl, (r, t) => report(55 + (t ? (r / t) * 30 : 5)));
   } catch (err) {
     warn('audio download failed, saving video-only:', err?.message || err);
-    await finalize(jobId, videoParts, 'mp4', baseFilename, 100, saveAs);
+    await finalize(jobId, videoParts, 'mp4', baseFilename, 100, saveAs, 'Saved without audio — the audio track could not be downloaded.');
     return;
   }
 
   sendStatus({ type: 'stream-progress', jobId, phase: 'remux', current: 90, total: 100 });
   log('muxing captured video + audio → MP4');
   let outParts;
+  let warning = null;
   try {
     outParts = await muxAvToMp4(videoParts, audioParts);
     log('mux done');
   } catch (err) {
     warn('mux failed, saving video-only:', err?.message || err);
     outParts = videoParts;
+    warning = 'Saved without audio — the audio track could not be merged.';
   }
-  await finalize(jobId, outParts, 'mp4', baseFilename, 100, saveAs);
+  await finalize(jobId, outParts, 'mp4', baseFilename, 100, saveAs, warning);
 }
 
 async function runDashJob(jobId, mpdUrl, baseFilename, saveAs) {
@@ -506,16 +558,18 @@ async function runDashJob(jobId, mpdUrl, baseFilename, saveAs) {
   sendStatus({ type: 'stream-progress', jobId, phase: 'remux', current: totalSteps, total: totalSteps });
   log('muxing video + audio → MP4');
   let outParts;
+  let warning = null;
   try {
     outParts = await muxAvToMp4(videoParts, audioParts);
     log('mux done');
   } catch (err) {
     // Last resort: save video-only so the user gets *something* (silent) rather
-    // than nothing, and we learn from the logged error.
+    // than nothing, but flag it so the popup can tell them audio was dropped.
     warn('mux failed, saving video-only:', err?.message || err);
     outParts = videoParts;
+    warning = 'Saved without audio — the audio track could not be merged.';
   }
-  await finalize(jobId, outParts, 'mp4', baseFilename, totalSteps, saveAs);
+  await finalize(jobId, outParts, 'mp4', baseFilename, totalSteps, saveAs, warning);
 }
 
 function deriveFilename(label, ext) {

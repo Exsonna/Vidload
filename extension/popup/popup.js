@@ -195,8 +195,8 @@ function applyJob(url, job) {
     showRowProgress(refs, job);
   } else if (job.status === 'done') {
     hideRowProgress(refs);
-    setDownloadButton(refs.dlBtn, 'Saved', { disabled: true });
-    if (refs.dlBtn) refs.dlBtn.title = '';
+    setDownloadButton(refs.dlBtn, job.warning ? 'Saved ⚠' : 'Saved', { disabled: true });
+    if (refs.dlBtn) refs.dlBtn.title = job.warning || '';
   } else if (job.status === 'error') {
     hideRowProgress(refs);
     setDownloadButton(refs.dlBtn, 'Retry');
@@ -240,9 +240,9 @@ function hostFromUrl(url) {
 function shortHost(url) {
   const h = hostFromUrl(url);
   if (!h) return '';
-  const parts = h.split('.');
-  if (parts.length <= 2) return h;
-  return parts.slice(-2).join('.');
+  // Registrable domain (shared with the SW) — correctly keeps multi-part public
+  // suffixes intact, e.g. hotmart.com.br instead of com.br.
+  return self.VidLoadUrl.registrableDomain(h) || h;
 }
 
 function looksLikeGibberish(s) {
@@ -258,11 +258,7 @@ function hasMetadata(item) {
 
 function looksLikeStreamSegment(item) {
   if (!item?.url) return false;
-  try {
-    return /\.(m4s|ts)(?:$|\?)/i.test(new URL(item.url).pathname);
-  } catch {
-    return false;
-  }
+  return self.VidLoadUrl.isStreamSegmentUrl(item.url); // shared with the SW
 }
 
 function isFilteredOut(item) {
@@ -350,6 +346,7 @@ function ensureExtension(base, item) {
 
 function makeTitleEditable(titleEl, item) {
   if (!titleEl) return;
+  const original = (titleEl.textContent || '').trim();
   titleEl.contentEditable = 'true';
   titleEl.focus();
   try {
@@ -364,13 +361,14 @@ function makeTitleEditable(titleEl, item) {
     titleEl.contentEditable = 'false';
     titleEl.removeEventListener('blur', onBlur);
     titleEl.removeEventListener('keydown', onKey);
-    if (commit) {
-      const next = titleEl.textContent.trim();
-      if (next) {
-        item.userLabel = next;
-        item.label = next;
-        rememberLabel(item.url, next);
-      }
+    // Only persist a genuine change. Blur fires on click-away / popup close too,
+    // so committing an unchanged value would overwrite the label with whatever
+    // partial text happened to be there.
+    const next = (titleEl.textContent || '').trim();
+    if (commit && next && next !== original) {
+      item.userLabel = next;
+      item.label = next;
+      rememberLabel(item.url, next);
     }
     titleEl.textContent = chooseTitle(item);
   };
@@ -412,13 +410,36 @@ function showRowMenu(item, anchorBtn, rowEl) {
   menuEl.style.top = `${top}px`;
   menuEl.style.left = `${left}px`;
   menuEl.style.visibility = '';
+  anchorBtn.setAttribute('aria-expanded', 'true');
+  // Move focus into the menu so keyboard/AT users can act on it.
+  menuEl.querySelector('.menu-item')?.focus();
 }
 
-function hideRowMenu() {
+function hideRowMenu({ restoreFocus = false } = {}) {
   if (!menuEl) return;
+  const anchor = menuTarget?.anchorBtn;
   menuEl.hidden = true;
+  if (anchor) {
+    anchor.setAttribute('aria-expanded', 'false');
+    if (restoreFocus) anchor.focus(); // return focus to the kebab on keyboard close
+  }
   menuTarget = null;
 }
+
+// Roving-focus keyboard navigation for the shared row menu.
+menuEl?.addEventListener('keydown', (e) => {
+  if (menuEl.hidden) return;
+  const items = [...menuEl.querySelectorAll('.menu-item')];
+  if (!items.length) return;
+  const idx = items.indexOf(document.activeElement);
+  if (e.key === 'ArrowDown') { e.preventDefault(); items[(idx + 1) % items.length].focus(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); items[(idx - 1 + items.length) % items.length].focus(); }
+  else if (e.key === 'Home') { e.preventDefault(); items[0].focus(); }
+  else if (e.key === 'End') { e.preventDefault(); items[items.length - 1].focus(); }
+  else if (e.key === 'Escape') { e.preventDefault(); hideRowMenu({ restoreFocus: true }); }
+  else if (e.key === 'Tab') { hideRowMenu({ restoreFocus: true }); }
+  // Enter/Space activate the focused .menu-item via its native button click.
+});
 
 menuEl?.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-action]');
@@ -1039,7 +1060,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === 'stream-progress') {
     applyJob(url, { status: 'active', phase: msg.phase, current: msg.current, total: msg.total });
   } else if (msg.type === 'stream-done') {
-    applyJob(url, { status: 'done', filename: msg.filename });
+    applyJob(url, { status: 'done', filename: msg.filename, warning: msg.warning || null });
     activeJobs.delete(msg.jobId);
   } else if (msg.type === 'stream-error') {
     applyJob(url, { status: 'error', error: msg.error });

@@ -6,6 +6,22 @@ body {
   color: #111827;
 }
 
+#youtube-notice {
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #991b1b;
+  background: #fef2f2;
+  border-top: 3px solid #ef4444;
+  border-bottom: 1px solid #fecaca;
+}
+
+#youtube-notice strong {
+  display: block;
+  font-size: 12.5px;
+  margin-bottom: 2px;
+}
+
 #trial-banner {
   padding: 8px 12px;
   font-size: 12px;

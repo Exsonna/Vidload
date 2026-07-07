@@ -20,18 +20,19 @@ Files:
 These exist because they're what gets the listing rejected — see [[chrome-extension-policy]] for the deeper rationale:
 
 - **Never name YouTube** anywhere in the listing copy. The webstore build ships without YouTube adapter code (see [[two-build-architecture]]); the listing must match.
-- **Never use "downloader" framing for YouTube** — not even in the negative ("can't download from YouTube") or past tense. Don't mention the platform at all.
+- **Never ship YouTube *capability* code in the webstore build.** No adapter, no hook, no extraction. The webstore build IS allowed exactly one YouTube mention: the **non-support disclaimer** (v0.4.27) in `popup/youtube-notice.js` (+ its banner markup in `popup.html`/`popup.css`), which tells users on YouTube that this build can't download it. A "we don't do YouTube" disclaimer is compliance-positive (the published reference extensions do the same); capability is what gets you rejected.
 - **All user-facing copy must work for the generic value prop**: "save videos from any webpage." Specific social platforms can be named in *later* screenshots (e.g. format-badge demos) but never in the hero shot or short description.
 - **Permissions justifications must match `manifest.json` exactly.** If you add/remove a permission, sync `listing.md` before submitting.
 
 ## Pre-submission sanity check
 
-```cmd
+```bash
 node build.mjs
-findstr /S /I /M "youtube" dist\webstore\*
+# "youtube" must appear ONLY in the disclaimer files — nowhere else:
+grep -rIil youtube dist/webstore/ | grep -vE 'popup/(youtube-notice\.js|popup\.html|popup\.css)$'
 ```
 
-Second command should return zero results. The build script already excludes the YouTube adapter, but the grep catches accidental leaks (a string in a comment, a wiki link in a JSDoc, etc.).
+The grep must return **zero** results. The three allowed files are the v0.4.27 non-support disclaimer (banner logic + markup + style). Any other hit — especially in `adapters/`, `background/`, `offscreen/`, `lib/`, `manifest.json`, or `popup/popup.js` — is a real capability leak and must be fixed before submitting.
 
 ## What's still missing (blockers for actual submission)
 
@@ -49,7 +50,18 @@ Run `node build.mjs` after icon changes so `dist/webstore/` and `dist/selfhost/`
 
 ## Package status
 
-Web Store package is built at `dist/vidload-webstore-v0.4.13.zip`.
+- **v0.4.22** (`dist/vidload-webstore-v0.4.22.zip`) — reliability overhaul, no monetization. Submitted to the store for review on the first ship.
+- **v0.4.25** (`dist/vidload-webstore-v0.4.25.zip`) — **monetization LIVE** (real ExtPay, $4.99). Built + verified (manifest valid, no YouTube, real ExtPay SDK, `extensionpay.com` content script). Supersedes the pending v0.4.22 — owner uploads it via the dashboard. Adds no new permissions.
+- **v0.4.28** (`dist/vidload-webstore-v0.4.28.zip`) — **audit-fix pass** (23 verified findings fixed, adversarially re-verified, no regressions). Pre-submission validation passed 45/45 (manifest valid MV3, all refs present, all JS syntax-checked, import/script resolution, no YouTube leak — now enforced by a `build.mjs` gate, icons 16/48/128 valid). 136.9 KB, 24 entries, `manifest.json` at zip root. Adds no new permissions → existing users auto-update with no re-prompt. **Current shippable package — supersedes v0.4.25.**
+
+Note: the Chrome Web Store dashboard lives in `chrome.google.com/webstore`, the extensions gallery, which Chrome **blocks any extension from scripting** — so the browser tool can't drive the upload; it's a manual click-through by the owner.
+
+## Auto-update behavior
+
+- **Webstore build: auto-updates.** Chrome polls the store every few hours and silently installs **published** versions in the background — existing users land on the new version within hours to ~a day (Chrome may stagger rollout). Because our updates add **no new permissions**, there's no re-prompt or disable. This is what makes the "fix → publish → users get it" maintenance loop work.
+- **Self-host `.crx` build: does NOT auto-update.** No `update_url` is set, so those users must reinstall to get fixes. Since YouTube (the most breakage-prone platform) ships **only** in the self-host build, add an `update_url` + update-manifest XML if that build is distributed to real users. **Open gap.**
+
+Health is monitored by the weekly [[platform-health-canary]].
 
 ## See also
 

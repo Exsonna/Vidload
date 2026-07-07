@@ -11,12 +11,14 @@ v0.3.1 adds DASH (`.mpd`) download alongside HLS, sharing the offscreen-document
 - **SegmentTimeline** for explicit segment timing.
 - **SegmentList** with `<Initialization>` and `<SegmentURL>` children.
 - **BaseURL chain** — MPD → Period → AdaptationSet → Representation resolution.
-- **Video-only**: we pick the highest-bandwidth video Representation and ignore audio AdaptationSets. Most muxed DASH streams (smaller news sites, many CDNs) include audio in the video Representation. Streams that ship video and audio separately will produce a silent file — that's a v0.3.2 candidate.
+- **Audio + video muxing (v0.4.21):** the parser now extracts the **best audio AdaptationSet** alongside the best video Representation, plus single-file `SegmentBase`-style reps (Reddit `v.redd.it`). When audio is separate, the offscreen engine downloads both tracks whole and muxes them into one MP4 via **mp4box.js** (`muxAvToMp4`) — no FFmpeg. Fixes the silent-video problem on Reddit / Facebook / split-DASH. Muxed streams (audio inside the video rep) take the old single-track concat path unchanged.
+  - mp4box muxing carries each input track's codec config (avcC for H.264, esds for AAC) into the output by passing the parsed `description` box to `addTrack` — the recipe was grounded by reading mp4box's actual `addTrack` source (the generic `e.description && s.addBox(e.description)` path).
+  - This same `muxAvToMp4` is reused by [[youtube-capture-approach]] for adaptive YouTube formats.
 
-## What v0.3.1 does NOT support
+## What is still NOT supported
 
 - **Live/dynamic MPDs** — would require live-segment tracking + cutoff handling.
-- **Separate audio muxing** — needs FFmpeg.wasm (or an MP4 muxer library).
+- **Codec edge cases in the muxer** — ≤1080p H.264 + AAC muxes cleanly; webm/VP9/AV1 + Opus pairings may not produce a valid MP4 (iteration-1 muxer).
 - **DRM/CENC encryption** — Widevine et al. are protected by DMCA §1201 anyway.
 - **Multi-period MPDs** — chained content (ad breaks, etc.); rare on social media.
 - **SegmentBase + byte-range indexing** — older DASH style.

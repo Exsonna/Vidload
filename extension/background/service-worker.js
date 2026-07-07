@@ -8,6 +8,7 @@
 // - Gates downloads via ExtensionPay (free tier + $4.99 lifetime unlock)
 
 importScripts('/lib/extpay.js');
+importScripts('/lib/media-url.js'); // provides self.VidLoadUrl (shared with popup)
 
 // =============================================================================
 // Referer rewrite rules — learned per-site, not hardcoded
@@ -27,8 +28,13 @@ importScripts('/lib/extpay.js');
 //
 // tabIds: [-1] scopes every rule to requests that don't originate from a
 // browser tab — i.e. our SW, offscreen document, and popup. The user's
-// normal browsing is unaffected because real tab requests have their own
-// tabId and never match.
+// normal tab-initiated browsing is unaffected because real tab requests have
+// their own tabId and never match. NOTE: the extension's OWN credentialed
+// fetches (metadata probe, offscreen download, direct pre-flight) DO match
+// these rules and will carry the learned Referer with the Origin stripped —
+// that is the whole point, but it means a learned Referer is attached to our
+// fetches, not just to nothing. We only learn a Referer for a domain once
+// (first-writer-wins, below) so a later unrelated page can't repoint it.
 //
 // Session rules (not dynamic) because Chrome only honors the tabIds key on
 // session rules. They're cleared on browser restart; the learned map lives
@@ -49,21 +55,11 @@ const SEED_REFERERS = {
   'tiktokcdn-us.com': 'https://www.tiktok.com/',
 };
 
-// Multi-part public suffixes we must keep intact when reducing a hostname to
-// its registrable domain (so play.hotmart.com.br → hotmart.com.br, not com.br).
-const MULTI_PART_TLDS = new Set([
-  'com.br', 'com.au', 'co.uk', 'co.jp', 'co.kr', 'co.in', 'com.cn',
-  'com.mx', 'com.tr', 'com.tw', 'com.hk', 'com.sg', 'net.au', 'org.uk',
-]);
+// Reduce a hostname to its registrable domain (shared with the popup).
+const { registrableDomain } = self.VidLoadUrl;
 
-function registrableDomain(host) {
-  if (!host) return null;
-  const parts = host.split('.').filter(Boolean);
-  if (parts.length <= 2) return host;
-  const lastTwo = parts.slice(-2).join('.');
-  if (MULTI_PART_TLDS.has(lastTwo)) return parts.slice(-3).join('.');
-  return lastTwo;
-}
+// Cap the learned map to the number of rules we can actually register.
+const REFERER_RULE_CAP = REFERER_RULE_MAX_ID - REFERER_RULE_BASE_ID + 1;
 
 async function loadRefererMap() {
   try {
@@ -80,7 +76,14 @@ function refererRuleFor(domain, referer, id) {
     priority: 1,
     action: {
       type: 'modifyHeaders',
-      requestHeaders: [{ header: 'Referer', operation: 'set', value: referer }],
+      requestHeaders: [
+        { header: 'Referer', operation: 'set', value: referer },
+        // Also drop the chrome-extension:// Origin. Some CDNs (Loom's
+        // luna.loom.com, etc.) 403 a media request whose Origin is an
+        // extension — a normal media fetch has no/origin-matching Origin.
+        // Host permissions still let us read the response without CORS.
+        { header: 'Origin', operation: 'remove' },
+      ],
     },
     condition: { requestDomains: [domain], tabIds: [-1] },
   };
@@ -109,18 +112,50 @@ async function applyRefererMap(map) {
   }
 }
 
-// Record that requests to `domain` should carry `referer`. No-op if unchanged.
-async function learnReferer(domain, referer) {
+// In-memory canonical map (source of truth within one SW lifetime). We rebuild
+// it from storage.session on wake. Mutating this map synchronously and flushing
+// through a single-flight promise chain keeps concurrent learnReferer() calls
+// (webRequest fires many at once) from clobbering each other's writes.
+let refererMap = null;
+let refererMapPromise = null;
+let refererFlush = Promise.resolve();
+
+async function ensureRefererMap() {
+  if (refererMap) return refererMap;
+  // Memoize the load so concurrent callers (startup setup + an early webRequest)
+  // share one map object instead of each loading and reassigning it.
+  if (!refererMapPromise) {
+    refererMapPromise = loadRefererMap().then((m) => { refererMap = m; return m; });
+  }
+  return refererMapPromise;
+}
+
+// Record that requests to `domain` should carry `referer`. First-writer-wins:
+// once a domain is mapped we don't let a later (possibly unrelated / cross-site)
+// initiator repoint it, and seeds stay authoritative. Fire-and-forget — the
+// write is serialized onto refererFlush so it can't race a concurrent call.
+function learnReferer(domain, referer) {
   if (!domain || !referer) return;
-  const map = await loadRefererMap();
-  if (map[domain] === referer) return;
-  map[domain] = referer;
-  await chrome.storage.session.set({ [REFERER_MAP_KEY]: map });
-  await applyRefererMap(map);
+  refererFlush = refererFlush
+    .then(async () => {
+      const map = await ensureRefererMap();
+      if (map[domain]) return; // already known — don't overwrite
+      map[domain] = referer;
+      // Bound the map to the rule cap; evict the oldest non-seed entry when full
+      // so a long session can't silently drop later domains past the 800 rules.
+      const keys = Object.keys(map);
+      if (keys.length > REFERER_RULE_CAP) {
+        const evictable = keys.find((k) => !(k in SEED_REFERERS));
+        if (evictable) delete map[evictable];
+      }
+      await chrome.storage.session.set({ [REFERER_MAP_KEY]: map });
+      await applyRefererMap(map);
+    })
+    .catch((err) => console.debug('[VidLoad SW] learnReferer failed', err?.message || err));
 }
 
 async function setupRefererRules() {
-  const map = await loadRefererMap();
+  const map = await ensureRefererMap();
   // Ensure seeds are present without clobbering anything we've learned.
   let changed = false;
   for (const [domain, referer] of Object.entries(SEED_REFERERS)) {
@@ -166,7 +201,11 @@ const TRIAL_RESET_KEY = 'vidload_trial_reset';
 const DAY_MS = 86_400_000;
 
 function todayKey() {
-  return new Date().toISOString().slice(0, 10);
+  // Local calendar date (YYYY-MM-DD) so the daily counter resets at the user's
+  // local midnight — matching the "resets at midnight local time" popup copy.
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 async function getDownloadStats() {
@@ -180,11 +219,36 @@ async function getDownloadStats() {
   return data;
 }
 
-async function bumpDownloadCount() {
-  const data = await getDownloadStats();
-  data.count += 1;
-  await chrome.storage.local.set({ [DOWNLOAD_COUNTER_KEY]: data });
-  return data.count;
+// Free-tier quota is a shared resource across concurrent downloads. Serialize
+// every read-check-write through one promise chain so two downloads clicked in
+// the same tick can't both read the same count and both pass the limit.
+let quotaChain = Promise.resolve();
+function withQuota(fn) {
+  const next = quotaChain.then(() => fn());
+  quotaChain = next.catch(() => {}); // keep the chain alive past a rejection
+  return next;
+}
+
+// In-flight metered downloads that have reserved a slot but not yet committed.
+// Counted toward the limit so concurrent reservations can't oversubscribe, then
+// converted to a committed count on success or released on failure. In-memory
+// only — if the SW suspends mid-download the reservation is forgiven (fails
+// toward the user), while committed counts persist in storage.
+let pendingMetered = 0;
+
+// Commit a reserved slot as a real download (increments the persistent count).
+function commitMeteredDownload() {
+  return withQuota(async () => {
+    if (pendingMetered > 0) pendingMetered -= 1;
+    const data = await getDownloadStats();
+    data.count += 1;
+    await chrome.storage.local.set({ [DOWNLOAD_COUNTER_KEY]: data });
+  });
+}
+
+// Release a reserved slot without counting it (download failed / cancelled).
+function releaseMeteredReservation() {
+  return withQuota(() => { if (pendingMetered > 0) pendingMetered -= 1; });
 }
 
 async function isPaid() {
@@ -222,9 +286,16 @@ async function getTrialStatus() {
   const endsAt = start + MONETIZATION.trialDays * DAY_MS;
   const msLeft = endsAt - Date.now();
   if (msLeft <= 0) return { active: false, daysLeft: 0, endsAt, msLeft: 0 };
-  return { active: true, daysLeft: Math.max(1, Math.ceil(msLeft / DAY_MS)), endsAt, msLeft };
+  // Whole days remaining, floored, so the badge ("Trial · 6d") agrees with the
+  // popup countdown ("6d 23h …") instead of rounding up to a phantom extra day.
+  return { active: true, daysLeft: Math.max(1, Math.floor(msLeft / DAY_MS)), endsAt, msLeft };
 }
 
+// Decide whether a download is allowed. For the metered free tier this also
+// RESERVES a quota slot atomically (under withQuota) so concurrent downloads
+// can't both slip past the limit. A reserved slot must later be committed
+// (commitMeteredDownload) on success or released (releaseMeteredReservation)
+// on failure. Trial/paid downloads are unmetered and reserve nothing.
 async function gateDownload() {
   if (await isPaid()) return { allowed: true, paid: true, metered: false };
   const trial = await getTrialStatus();
@@ -237,24 +308,28 @@ async function gateDownload() {
       metered: false,
     };
   }
-  const data = await getDownloadStats();
-  if (data.count >= MONETIZATION.freeDailyLimit) {
+  return withQuota(async () => {
+    const data = await getDownloadStats();
+    const used = data.count + pendingMetered;
+    if (used >= MONETIZATION.freeDailyLimit) {
+      return {
+        allowed: false,
+        paid: false,
+        limit: MONETIZATION.freeDailyLimit,
+        used,
+        priceLabel: MONETIZATION.priceLabel,
+        metered: false,
+      };
+    }
+    pendingMetered += 1; // reserve this slot until commit/release
     return {
-      allowed: false,
+      allowed: true,
       paid: false,
       limit: MONETIZATION.freeDailyLimit,
-      used: data.count,
-      priceLabel: MONETIZATION.priceLabel,
-      metered: false,
+      used,
+      metered: true,
     };
-  }
-  return {
-    allowed: true,
-    paid: false,
-    limit: MONETIZATION.freeDailyLimit,
-    used: data.count,
-    metered: true,
-  };
+  });
 }
 
 // =============================================================================
@@ -318,9 +393,7 @@ function classifyByUrl(url) {
 // them (so "show hidden" can surface them) but must NOT stamp them with the
 // page's poster/duration/title — that would make them look like real videos
 // and defeat the popup's segment filter.
-function looksLikeSegmentUrl(url) {
-  try { return /\.(m4s|ts)(?:$|\?)/i.test(new URL(url).pathname); } catch { return false; }
-}
+const looksLikeSegmentUrl = self.VidLoadUrl.isStreamSegmentUrl;
 
 // Before saving a "direct" file, confirm the URL actually returns video and not
 // an HTML/text error page. Expired/forbidden links and throttled or anti-bot
@@ -381,7 +454,7 @@ async function upsertItem(tabId, item) {
   const key = dedupKey(item.url);
   const existing = items.find((it) => dedupKey(it.url) === key);
   if (existing) {
-    for (const k of ['poster', 'width', 'height', 'duration', 'pageTitle', 'description', 'contextLabel', 'referer']) {
+    for (const k of ['poster', 'width', 'height', 'duration', 'pageTitle', 'description', 'contextLabel']) {
       if (existing[k] == null && item[k] != null) existing[k] = item[k];
     }
     if (item.bytes && (!existing.bytes || item.bytes > existing.bytes)) {
@@ -400,20 +473,28 @@ async function upsertItem(tabId, item) {
   await setTabItems(tabId, items);
 }
 
+// Serialize creation behind a shared in-flight promise so two downloads clicked
+// in the same tick share one createDocument call instead of racing (both seeing
+// zero contexts and both creating → the second throws). The error-string swallow
+// stays as a belt-and-suspenders fallback for a doc left over from a prior wake.
+let offscreenCreating = null;
 async function ensureOffscreenDocument() {
   const contexts = await chrome.runtime.getContexts({
     contextTypes: ['OFFSCREEN_DOCUMENT'],
   });
   if (contexts.length > 0) return;
-  try {
-    await chrome.offscreen.createDocument({
+  if (!offscreenCreating) {
+    offscreenCreating = chrome.offscreen.createDocument({
       url: OFFSCREEN_URL,
       reasons: ['BLOBS'],
       justification: 'Concatenate and decrypt HLS/DASH video segments into a downloadable file.',
-    });
-  } catch (err) {
-    if (!String(err.message || '').includes('Only a single offscreen')) throw err;
+    })
+      .catch((err) => {
+        if (!String(err.message || '').includes('Only a single offscreen')) throw err;
+      })
+      .finally(() => { offscreenCreating = null; });
   }
+  await offscreenCreating;
 }
 
 let jobCounter = 0;
@@ -480,12 +561,18 @@ function scheduleJobCleanup(jobId) {
 }
 
 async function getJobsMerged() {
-  if (jobs.size > 0) return jobsSnapshot();
-  // SW may have suspended since the download started — rehydrate from storage.
+  // Always merge storage into memory rather than short-circuiting on jobs.size:
+  // after an SW wake the in-memory Map may hold only the one job whose progress
+  // message woke us, so returning it alone would drop other still-running jobs.
+  // In-memory wins on id collision (it's fresher); stored fills in the rest and
+  // backfills static fields (url/filename) onto a progress-only in-memory entry.
   const stored = await chrome.storage.session.get(JOBS_KEY);
   const snap = stored[JOBS_KEY] || {};
-  for (const [id, j] of Object.entries(snap)) jobs.set(id, j);
-  return snap;
+  for (const [id, storedJob] of Object.entries(snap)) {
+    const mem = jobs.get(id);
+    jobs.set(id, mem ? { ...storedJob, ...mem } : storedJob);
+  }
+  return jobsSnapshot();
 }
 
 // Per-tab "page media context": the label, poster, duration, and dimensions
@@ -498,12 +585,15 @@ const pageTitles = new Map();     // tabId -> document.title of the top frame
 
 const CONTEXT_FIELDS = ['poster', 'duration', 'width', 'height'];
 
-function mergeContext(tabId, patch, { allowLabelClear } = {}) {
+function mergeContext(tabId, patch, { allowLabel } = {}) {
   const prev = activeContexts.get(tabId) || {};
   const next = { ...prev };
-  if ('label' in patch) {
+  // Only the top frame may set OR clear the label — a subframe (embedded ad,
+  // quote-tweet, player iframe) must not overwrite the top frame's real label
+  // with its own DOM heading. Poster/duration/dims from any frame still merge.
+  if ('label' in patch && allowLabel) {
     if (patch.label) next.label = patch.label;
-    else if (allowLabelClear) delete next.label;
+    else delete next.label;
   }
   for (const f of CONTEXT_FIELDS) {
     if (patch[f] != null) next[f] = patch[f];
@@ -547,10 +637,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.target && msg.target !== 'sw') return false;
 
   if (msg?.type === 'active-context' && sender.tab?.id !== undefined) {
-    // Only the top frame may clear the label (subframes that find no context
-    // must not clobber a label the top frame set). Poster/duration/dims from
-    // any frame are merged in.
-    mergeContext(sender.tab.id, msg, { allowLabelClear: !!msg.frameTop });
+    // Only the top frame may set/clear the label; subframes contribute only
+    // poster/duration/dims. Prevents an embedded iframe's heading from
+    // overwriting the real page label (wrong download filename).
+    mergeContext(sender.tab.id, msg, { allowLabel: !!msg.frameTop });
     backfillContext(sender.tab.id);
     return false;
   }
@@ -573,13 +663,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
   if (msg?.type === 'stream-done' && msg.jobId) {
-    setJob(msg.jobId, { status: 'done', filename: msg.filename }, { immediate: true });
-    scheduleJobCleanup(msg.jobId);
+    // Meter segmented downloads on SUCCESS (not at dispatch): a job that fails
+    // partway shouldn't consume a free-tier slot. Rehydrate first so the job's
+    // `metered` flag survives an SW suspend between dispatch and completion.
+    (async () => {
+      await getJobsMerged();
+      const job = jobs.get(msg.jobId);
+      setJob(msg.jobId, { status: 'done', filename: msg.filename, warning: msg.warning || null }, { immediate: true });
+      if (job?.metered) await commitMeteredDownload();
+      scheduleJobCleanup(msg.jobId);
+    })();
     return false;
   }
   if (msg?.type === 'stream-error' && msg.jobId) {
-    setJob(msg.jobId, { status: 'error', error: msg.error }, { immediate: true });
-    scheduleJobCleanup(msg.jobId);
+    (async () => {
+      await getJobsMerged();
+      const job = jobs.get(msg.jobId);
+      setJob(msg.jobId, { status: 'error', error: msg.error }, { immediate: true });
+      if (job?.metered) await releaseMeteredReservation();
+      scheduleJobCleanup(msg.jobId);
+    })();
     return false;
   }
 
@@ -668,6 +771,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // expired, or forbidden links).
       const pre = await preflightDirect(msg.url);
       if (!pre.ok) {
+        if (gate.metered) await releaseMeteredReservation();
         sendResponse({ ok: false, error: pre.error });
         return;
       }
@@ -675,11 +779,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         { url: msg.url, filename: msg.filename, saveAs: !!msg.saveAs },
         async (downloadId) => {
           if (chrome.runtime.lastError) {
+            if (gate.metered) await releaseMeteredReservation();
             sendResponse({ ok: false, error: chrome.runtime.lastError.message });
           } else {
-            // Only count downloads that consume the free-tier quota.
-            // Trial and paid downloads are unlimited.
-            if (gate.metered) await bumpDownloadCount();
+            // Commit the reserved quota slot only on a real download. Trial and
+            // paid downloads are unmetered (gate.metered === false).
+            if (gate.metered) await commitMeteredDownload();
             sendResponse({ ok: true, downloadId });
           }
         }
@@ -692,7 +797,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // Offscreen document can't call chrome.downloads (Chrome restricts that
     // API inside offscreen contexts). It hands the blob URL here for the SW
     // to commit. Gating already happened when 'download-stream' was accepted,
-    // so we don't re-gate.
+    // so we don't re-gate — but restrict to a blob: URL from our own offscreen
+    // document so a stray/compromised content script can't drive an arbitrary,
+    // ungated download through this handler.
+    const blobPrefix = 'blob:' + chrome.runtime.getURL('');
+    const fromOffscreen = !!sender.url && sender.url.endsWith('/offscreen/offscreen.html');
+    if (!fromOffscreen || !msg.url.startsWith(blobPrefix)) {
+      sendResponse({ ok: false, error: 'rejected' });
+      return false;
+    }
     chrome.downloads.download(
       { url: msg.url, filename: msg.filename, saveAs: !!msg.saveAs },
       (downloadId) => {
@@ -724,6 +837,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           phase: 'manifest',
           current: 0,
           total: 100,
+          metered: gate.metered, // committed on stream-done, released on stream-error
         }, { immediate: true });
         chrome.runtime.sendMessage({
           target: 'offscreen',
@@ -734,9 +848,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           filename: msg.filename,
           saveAs: !!msg.saveAs,
         });
-        if (gate.metered) await bumpDownloadCount();
         sendResponse({ ok: true, jobId });
       } catch (err) {
+        if (gate.metered) await releaseMeteredReservation();
         sendResponse({ ok: false, error: String(err?.message || err) });
       }
     })();
@@ -764,6 +878,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           phase: 'manifest',
           current: 0,
           total: 1,
+          metered: gate.metered, // committed on stream-done, released on stream-error
         }, { immediate: true });
         chrome.runtime.sendMessage({
           target: 'offscreen',
@@ -774,9 +889,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           filename: msg.filename,
           saveAs: !!msg.saveAs,
         });
-        if (gate.metered) await bumpDownloadCount();
         sendResponse({ ok: true, jobId });
       } catch (err) {
+        if (gate.metered) await releaseMeteredReservation();
         sendResponse({ ok: false, error: String(err?.message || err) });
       }
     })();
@@ -823,10 +938,10 @@ chrome.webRequest.onHeadersReceived.addListener(
 
     // Learn the Referer for this media's registrable domain so the popup probe
     // and the offscreen download (both extension-originated) can fetch it.
+    const referer = refererFromDetails(details);
     try {
       const host = new URL(details.url).hostname;
       const domain = registrableDomain(host);
-      const referer = refererFromDetails(details);
       if (domain && referer) learnReferer(domain, referer);
     } catch { /* ignore malformed URLs */ }
 
@@ -845,7 +960,6 @@ chrome.webRequest.onHeadersReceived.addListener(
       duration: seg ? null : (ctx.duration || null),
       width: seg ? null : (ctx.width || null),
       height: seg ? null : (ctx.height || null),
-      referer: refererFromDetails(details),
       ts: Date.now(),
     });
   },

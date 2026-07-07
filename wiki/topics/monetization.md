@@ -1,15 +1,19 @@
 # Monetization design — ExtensionPay $4.99 one-time
 
+## Status: LIVE (v0.4.24, activated 2026-06-11)
+
+`MONETIZATION.enabled = true`. The real ExtensionPay SDK (Glench/ExtPay, ISC) is vendored at `lib/extpay.js` (replaced the stub), the required `extensionpay.com` content script is registered in both builds, `extpayId='vidload'` matches the registered extension, and a Stripe-test-card payment was verified end-to-end (checkout → `extensionpay.com` content script → Pro unlock). Test mode auto-disables once installed from the store (not unpacked).
+
 ## Decision
 
 VidLoad monetizes via **ExtensionPay** with a free trial, a free tier, and a one-time unlock:
 
-- **Free trial**: 7 days of unlimited downloads on first install (v0.4.12). Auto-starts — no signup required. Downloads during the trial do **not** count against any daily quota.
+- **Free trial**: 7 days of unlimited downloads. Starts the first time monetization is active for a user and **re-grants on every `trialResetId` change** (see Trial timer). Downloads during the trial do **not** count against any daily quota.
 - **Free tier (post-trial)**: 3 downloads per day (counter resets at midnight local time).
-- **Pro**: $4.99 one-time → lifetime unlimited downloads.
+- **Pro**: $4.99 one-time → lifetime unlimited downloads. An always-visible **"Upgrade ✨"** link in the popup header (shown to any non-paid user) opens ExtPay checkout directly; a **live countdown header** ticks down the trial.
 - **Stripe** handles payments via ExtensionPay; we don't run our own backend.
 
-The trial scaffolding is wired but **disabled by default** along with the rest of the monetization stack. Flip `MONETIZATION.enabled = true` to activate everything at once.
+To re-grant everyone another free trial after a big fix, bump `MONETIZATION.trialResetId`. To roll back monetization, set `enabled = false`.
 
 ## Why ExtensionPay
 

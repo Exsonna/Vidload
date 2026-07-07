@@ -8,7 +8,7 @@
 // Source extension/ is the dev build — load it unpacked while iterating.
 // Release artifacts come from this script.
 
-import { readFile, writeFile, mkdir, cp, rm } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, cp, rm, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
@@ -116,9 +116,50 @@ async function build(target) {
   ];
   await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
 
+  // Enforce the two-build invariant: the Web Store build must contain NO YouTube
+  // capability code (that gets the listing removed). The only allowed mention is
+  // the non-support disclaimer. This turns the documented manual grep into a hard
+  // build gate — a leak in any shared file fails the build instead of shipping.
+  if (target === 'webstore') await assertNoYouTubeLeak(outDir);
+
   const adapters = cfg.adapters.length ? cfg.adapters.join(', ') : '(none)';
   console.log(`Built ${target} → ${path.relative(ROOT, outDir)} (adapters: ${adapters})`);
 }
 
+// Files in the webstore build that are ALLOWED to mention YouTube: the
+// non-support disclaimer (banner logic + its markup/style). Anything else that
+// matches the capability regex is a real leak.
+const LEAK_WHITELIST = new Set([
+  'popup/youtube-notice.js',
+  'popup/popup.html',
+  'popup/popup.css',
+]);
+// Vendored minified libraries — trusted black boxes, not our capability code.
+const LEAK_SKIP = new Set([
+  'lib/mux.min.js',
+  'lib/mp4box.min.js',
+  'lib/extpay.js',
+]);
+const LEAK_RE = /youtube|googlevideo|ytinitial|ytcfg|youtu\.be/i;
+const BINARY_RE = /\.(png|jpg|jpeg|gif|webp|ico|woff2?|ttf|eot|zip|crx)$/i;
+
+async function assertNoYouTubeLeak(outDir) {
+  const entries = await readdir(outDir, { recursive: true, withFileTypes: true });
+  for (const ent of entries) {
+    if (!ent.isFile()) continue;
+    const abs = path.join(ent.parentPath ?? ent.path, ent.name);
+    const rel = path.relative(outDir, abs).replace(/\\/g, '/');
+    if (LEAK_WHITELIST.has(rel) || LEAK_SKIP.has(rel) || BINARY_RE.test(rel)) continue;
+    const text = await readFile(abs, 'utf8');
+    if (LEAK_RE.test(text)) {
+      throw new Error(
+        `YouTube capability leak in webstore build: "${rel}" matches ${LEAK_RE}. ` +
+        `This would get the Chrome Web Store listing removed. Move the code to the ` +
+        `self-host-only path, or add the file to LEAK_WHITELIST if it is a disclaimer.`
+      );
+    }
+  }
+}
+
 await Promise.all(Object.keys(BUILDS).map(build));
-console.log('Done.');
+console.log('Done — webstore build passed the YouTube-leak check.');

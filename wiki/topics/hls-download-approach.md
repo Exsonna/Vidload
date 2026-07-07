@@ -2,7 +2,9 @@
 
 ## Decision
 
-VidLoad v0.2 downloads HLS streams by **concatenating raw segment bytes**, with no transmuxing step. Output extension is `.ts` for MPEG-TS segments or `.mp4` for fragmented MP4 (fMP4) segments. Both play in VLC, Windows Media Player, and modern browsers.
+VidLoad v0.2 downloads HLS streams by **concatenating raw segment bytes** in the offscreen document. fMP4 (`.m4s`/`.mp4`) segments are concatenated with their init segment → a valid `.mp4`.
+
+**Update (v0.4.16): real MP4 for MPEG-TS too.** Concatenated MPEG-TS used to save as `.ts`, which confuses users (wrong icon, some players won't open it, and you can't just rename it — TS ≠ MP4 container). We now **transmux TS → fragmented MP4** with vendored **mux.js** (~115 KB, pure JS, no FFmpeg/WASM) so the output is a proper `.mp4`. Falls back to `.ts` only if mux.js can't handle the codec. Still no FFmpeg. (Separate audio/video muxing — DASH/YouTube — uses mp4box.js; see [[dash-download-approach]].)
 
 ## Rationale
 
