@@ -1,76 +1,72 @@
 # Context pack — VidLoad
 
-Generated: 2026-06-11
+Generated: 2026-07-14
 
 ## What this project is
 
 VidLoad is a Chrome MV3 extension that detects and downloads videos from arbitrary webpages (social media, course platforms, generic HTML5/HLS/DASH). **Two builds from one source tree** via `build.mjs`:
 
-- **Web Store build** (`dist/webstore/`) — generic HTML5 + HLS + DASH + TikTok/Instagram/Twitter adapters. **No YouTube** code or strings (enforced by a pre-flight `grep youtube dist/webstore/`).
+- **Web Store build** (`dist/webstore/`) — generic HTML5 + HLS + DASH + TikTok/Instagram/Twitter adapters. **No YouTube** capability; the only allowed YouTube mention is the non-support banner (`popup/youtube-notice.js`). Enforced by an **automated leak gate in `build.mjs`** (v0.4.28) that hard-fails the webstore build on any `youtube|googlevideo|ytcfg` hit outside the 3 disclaimer files.
 - **Self-hosted build** (`dist/selfhost/`) — everything + YouTube (player-URL capture). Distributed as `.crx`.
 
-**Monetization is LIVE** (v0.4.24): ExtensionPay, 7-day trial → 3/day free → **$4.99 one-time** Pro. Head: **v0.4.25**, pushed to `origin/master`.
+**Monetization is LIVE, lifetime-cap model** (v0.4.29): ExtensionPay, **10 free lifetime downloads → $4.99 one-time** Pro. No trial, no daily reset. Head: **v0.4.29** (`f216af8`) on `origin/master`; one trivial screenshot commit (`acc2abb`) pending push.
 
 ## Active topics
 
 - [[chrome-extension-policy]] — dual-build split (Google bans YouTube downloaders).
-- [[hls-download-approach]] — concat segments; **v0.4.16 TS→MP4 transmux via mux.js** (no FFmpeg).
-- [[dash-download-approach]] — **v0.4.21 audio+video muxing via mp4box.js** (Reddit/FB/split-DASH).
-- [[youtube-capture-approach]] — capture the player's deciphered googlevideo URLs (no base.js cipher); self-host only.
-- [[two-build-architecture]] — `build.mjs` rewrites manifest per target; adapters/files opt in per build.
-- [[monetization]] — LIVE; ExtPay real SDK, trial re-grant via `trialResetId`, countdown header, Upgrade link.
-- [[offscreen-api-limits]] — `chrome.downloads` unreachable in offscreen → SW-routed `commit-download`.
-- [[webstore-submission]] — assets + hard rules; v0.4.25 package built.
+- [[hls-download-approach]] — concat segments; TS→MP4 transmux via mux.js; **v0.4.28 fixed byte-range HLS** (real `Range` requests) + AES IV validation.
+- [[dash-download-approach]] — audio+video muxing via mp4box.js (Reddit/FB/split-DASH).
+- [[youtube-capture-approach]] — capture the player's deciphered googlevideo URLs; self-host only.
+- [[two-build-architecture]] — `build.mjs` rewrites manifest per target; now with the enforced YouTube-leak gate.
+- [[monetization]] — **LIVE, lifetime-cap** (v0.4.29): 10 free → $4.99; trial removed; pay-flow hardened.
+- [[offscreen-api-limits]] — `chrome.downloads` unreachable in offscreen → SW-routed `commit-download` (now restricted to offscreen blob: URLs).
+- [[webstore-submission]] — assets + hard rules; v0.4.29 package; submitted for review.
+- [[platform-health-canary]] — weekly structural checkup (`vidload-platform-health-check`).
 
-## Recent decisions (this session, 2026-06-11)
+## Recent decisions (this session, 2026-07-14)
 
-- **Generalized Referer (v0.4.14):** learned per registrable domain from `webRequest` `details.initiator`; `all_frames:true`; fixed a `build.mjs` bug that forced `all_frames:false` in dist (published build had lacked the iframe fix).
-- **Real MP4 (v0.4.16):** transmux MPEG-TS HLS → fMP4 with **mux.js** (vendored ~115 KB). Falls back to `.ts` on unsupported codec.
-- **Popup reliability (v0.4.15):** real titles (page title, generic "Video Player" suppressed), poster scan, **0–100% progress bar**, **background-download persistence** (SW job table mirrored to `storage.session`).
-- **HLS dedup (v0.4.17):** `dedupKey` strips query for `.m3u8`/`.mpd` (download URL keeps token via `canonicalUrl`); popup hides child variant/audio playlists under their master.
-- **Download badge (v0.4.18); direct pre-flight (v0.4.19→v0.4.20):** refuse to save an HTML error page as `.txt`, but **fail-open** on CORS/network errors. Generic `og:video`/JSON-LD scraper for long-tail sites.
-- **A/V muxing (v0.4.21):** **mp4box.js** (~147 KB). DASH parser extracts best audio + single-file `SegmentBase`; `muxAvToMp4` carries codec config via the sample-entry `description` box.
-- **YouTube via capture (v0.4.22, self-host):** MAIN-world hook captures the player's already-deciphered `googlevideo` URLs; adapter builds a quality-selectable `mux` item; reuses `muxAvToMp4`. Avoids the cipher treadmill (confirmed by reading the live 2.78 MB obfuscated base.js).
-- **Monetization go-live (v0.4.23–v0.4.25):** trial re-grant via bumpable `trialResetId` (`reliability-2026-06`), live countdown header, real ExtPay SDK + required `extensionpay.com` content script, always-visible Upgrade link. **Stripe-test-card payment → Pro verified.**
-- **Process:** committed verified work continuously; pushed 7 commits (needed the `127.0.0.1:7898` proxy override — gitconfig's `:26433` is stale). Store dashboard can't be browser-automated (extensions gallery is unscriptable) → owner uploads manually.
+- **Full Fable audit → v0.4.28 (23 fixes).** 8-dimension multi-agent Workflow with adversarial verification (each finding refuted by an independent skeptic). 35 raw → **23 real / 12 rejected**. Fixed: atomic free-tier quota reservation (concurrent downloads can't exceed the limit), local-midnight counter reset, meter-on-success (failed segmented jobs don't burn a slot), enforced YouTube-leak build gate, byte-range HLS (`#EXT-X-BYTERANGE` was parsed but never applied → corrupt output), job-wide abort on failure, 2 GB memory ceiling, AES IV validation, `getJobsMerged` always-merge (restores all in-flight jobs), race-safe learned-Referer (first-writer-wins + bounded map), offscreen-create TOCTOU, `commit-download` origin restriction, subframe filename clobber, keyboard menu + aria, rename-on-blur guard, "Saved ⚠ (no audio)" warning, and a new shared `lib/media-url.js` dedup helper. Second verification workflow: **0 regressions**.
+- **"Why no paid users" monetization audit.** 3-angle Workflow (gating-bypass / payment-integrity / funnel-design) converged: the paywall almost never fired. A 7-day unlimited trial + a 3/day daily-reset tier (~90 free/month) + `trialResetId` re-grants meant the median downloader was never asked to pay. **Zero paid was the predictable output of the funnel**, not a broken checkout (payment plumbing verified intact).
+- **v0.4.29 — funnel redesign (chosen: lifetime cap).** Replaced trial + daily tier with **10 lifetime free downloads → $4.99 unlimited forever** (single accumulating counter). Removed `trialDays`/`trialResetId`/`getTrialStatus` entirely. Storage migration seamless (old `{date,count}` preserved). Pay-flow fixes: `isPaid()` caches a confirmed payer (`vidload_paid_cache`) and **fails OPEN** on ExtPay outage; `onPaid` caches + broadcasts `paid-status-changed` (live unlock); `open-payment-page` awaits the checkout tab + surfaces failures. Popup: trial countdown → **free-quota banner**, `Free · used/10` badge, benefit tooltip. Verified: 0 issues.
+- **Store update + submitted.** v0.4.29 uploaded (owner); listing pricing bullets + `storage` justification rewritten; privacy page (`docs/privacy.html`, effective 2026-07-14) updated for the new data model + republished via Pages; **screenshot 5 regenerated** (`05-free-upgrade.png`, a 1280×800 composite rendered with headless Chrome), stale `05-trial-upgrade.png` deleted. Owner clicked Submit for review.
+- **git proxy fixed** — `http.proxy socks5h://127.0.0.1:7898` (7898 is **SOCKS5**, not HTTP; old `:26433` was dead). Persistent config change. Tunnel occasionally flaky (port up but upstream can't reach github → retry / switch node).
 
 ## Open questions
 
-- YouTube capture limits — only *played* qualities captured; 1440p/4K (VP9/AV1+Opus) may not mux; SABR/POST videos may not be captured.
-- git proxy port mismatch (`:26433` gitconfig vs `:7898` live) — offered to fix the global config; awaiting yes.
-- Free-tier limit (3/day) — calibrate against real conversion now that ExtPay is live.
-- Final product name; Twitter title disambiguation live-confirm.
-- DASH/Reddit muxer codec-pairing edge cases (iteration-1).
-- **Self-host `.crx` has no `update_url`** → those users don't auto-update (YouTube fixes won't reach them). Open gap; offered to add an update manifest.
-- Monitoring: a weekly [[platform-health-canary]] now runs (structural early-warning only); a real in-browser download spot-check is still the source of truth.
+- **Conversion** — will the lifetime-cap change actually produce paid users? Tune `freeLifetimeLimit` (10) if needed. Judge as paid ÷ paywall-impressions, not ÷ installs.
+- **Confirm a real end-to-end purchase** — `extpayId: 'vidload'` must match the extensionpay.com dashboard exactly, else every checkout dead-ends. Highest-value check.
+- **Which version is the *published* store build** — if a pre-monetization build was ever live, that alone explains prior zero conversions.
+- Reinstall/clear-storage resets the free-download count (client-side metering unwinnable) — accepted; server-side meter = future backend.
+- YouTube capture limits — only *played* qualities captured; 1440p/4K (VP9/AV1+Opus) may not mux; SABR videos may not be captured.
+- Self-host `.crx` has no `update_url` → those users don't auto-update (open gap).
 
 ## Entity quick-ref
 
 | Name | Role |
 |---|---|
-| ExtensionPay | Monetization SaaS; Stripe-backed. **Real SDK now vendored** at `lib/extpay.js`. extension id `vidload`. |
-| Stripe | Payment processor under ExtPay. Statement descriptor `VIDLOAD`, $4.99 one-time. |
-| mux.js | TS→fMP4 transmuxer (Apache-2.0), `lib/mux.min.js`. |
-| mp4box.js | A/V muxer (BSD/LGPL), `lib/mp4box.min.js`. |
-| Chrome Web Store | Distribution for webstore build; bans YouTube downloaders; dashboard unscriptable by extensions. |
+| ExtensionPay | Monetization SaaS; Stripe-backed. Real SDK at `lib/extpay.js`. extension id `vidload`. |
+| Stripe | Payment processor under ExtPay. $4.99 one-time. |
+| mux.js / mp4box.js | TS→fMP4 transmuxer / A/V muxer (`lib/*.min.js`). |
+| Chrome Web Store | Distribution for webstore build; bans YouTube downloaders; **dashboard is unscriptable by extensions** (upload is manual). |
+| GitHub Pages | Serves the privacy/support site from **`/docs` on `Exsonna/Vidload`** (this repo's origin). |
 
 ## Outputs this session
 
-- 7 commits (`0e00a3f` mux.js, `87216e8` v0.4.14–0.4.20, `fefbe30` mp4box.js, `010dc86` v0.4.21–0.4.22, `525aa4c` v0.4.23, `5b5cbf2` v0.4.24, `230cfdb` v0.4.25), pushed to `origin/master`.
-- Vendored libs: mux.js, mp4box.js, real ExtPay SDK (+ NOTICEs).
-- New: `adapters/youtube-hook.js`. Packages: `dist/vidload-webstore-v0.4.22.zip`, `…-v0.4.25.zip`.
-- Wiki: new [[youtube-capture-approach]] + [[platform-health-canary]]; updated [[monetization]] (LIVE), [[dash-download-approach]] (muxing), [[hls-download-approach]] (transmux), [[webstore-submission]] (v0.4.25 + auto-update behavior), INDEX.
-- **Scheduled task `vidload-platform-health-check`** (cron `0 9 * * 1`) — weekly structural canary; reports + drafts fixes only, never auto-ships.
-- `chats/2026-06-11-monetization-golive.md` + this pack.
+- Commits: `65f5d12` (v0.4.28 audit fixes) + `f216af8` (v0.4.29 monetization overhaul) pushed to `origin/master`; `acc2abb` (screenshot swap) committed, **push pending** (proxy).
+- Packages: `dist/vidload-webstore-v0.4.28.zip`, `…-v0.4.29.zip` (both validated 45/45, no YouTube leak).
+- New file `extension/lib/media-url.js` (shared SW+popup URL/domain helpers). New screenshot `webstore-assets/screenshots/05-free-upgrade.png`.
+- A reusable pre-submission validator lives in scratchpad (`validate-build.mjs`) — checks manifest, file refs, JS syntax, import/script resolution, leak, icons.
+- Wiki: [[monetization]] rewritten to the lifetime-cap model + audit rationale; [[webstore-submission]] package status; INDEX updated; `chats/2026-07-14-audit-monetization-overhaul.md`.
 
 ## Latest session delta
 
-v0.4.14 Referer+iframes → v0.4.15 popup reliability → v0.4.16 transmux → v0.4.17 HLS dedup → v0.4.18 badge → v0.4.19/20 pre-flight + scraper → v0.4.21 DASH muxing → v0.4.22 YouTube capture → v0.4.23 trial re-grant + countdown → v0.4.24 ExtPay activated → v0.4.25 Upgrade link.
+v0.4.27 (prior) → **v0.4.28** full audit-fix pass (23 findings, adversarially verified) → **v0.4.29** monetization funnel overhaul (10 free → $4.99, trial removed, pay-flow hardened) → store package uploaded + listing/privacy/screenshot updated + submitted for review.
 
 ## To pick up next session
 
-1. **Confirm the v0.4.25 store upload went through** + passed review (owner-side; supersedes pending v0.4.22).
-2. **Check the Monday [[platform-health-canary]] report** (`vidload-platform-health-check`); recommend the owner clicks "Run now" once to pre-approve its tools + get a baseline.
-3. Two standing offers awaiting yes: fix the **git proxy** (`git config --global http.proxy http://127.0.0.1:7898`) and add the **self-host `.crx` `update_url`** so those users auto-update.
-4. Watch for ExtPay live-payment reports / first real conversions; calibrate the 3/day free limit.
-5. YouTube robustness: handle webm/Opus muxing (1440p/4K) and detect SABR gracefully. Self-host `.crx` distribution + marketing site.
+1. **Push `acc2abb`** (screenshot commit) once the proxy tunnel is stable — `git push`. Non-blocking.
+2. **Confirm v0.4.29 passed review** and is the published store version.
+3. **Verify a real end-to-end purchase** unlocks Pro (extpayId `vidload`).
+4. **Watch first conversions** after the lifetime-cap change; tune `freeLifetimeLimit`.
+5. Check the Monday [[platform-health-canary]] report.
+6. Longer tail: self-host `.crx` `update_url`; YouTube webm/Opus muxing (1440p/4K) + SABR detection.
