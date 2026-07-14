@@ -1,6 +1,6 @@
 # VidLoad Privacy Policy
 
-**Effective date:** May 18, 2026
+**Effective date:** July 14, 2026
 
 VidLoad is a browser extension that detects and downloads videos from webpages you visit. This document describes exactly what data the extension handles and what it does not.
 
@@ -23,8 +23,8 @@ To do its job, VidLoad needs to read certain information **inside your browser**
 | URLs of videos detected on the active tab | To display the list of downloadable videos in the popup. | `chrome.storage.session` — wiped when the tab closes or the browser restarts. |
 | Title, dimensions, poster image (when available) of detected videos | To help you identify which video is which. | Same as above. |
 | Renamed labels and dismissed items | To remember your preferences so the popup looks the same next time. | `chrome.storage.local` — persists until you uninstall or clear extension data. |
-| Daily download count (if monetization is active) | To enforce the free-tier daily limit. | `chrome.storage.local`. |
-| Install timestamp (if monetization is active) | To track the 7-day free-trial window. | `chrome.storage.local`. |
+| Free-download count (if monetization is active) | To track how many of the free downloads you've used. | `chrome.storage.local`. |
+| Purchase-status flag (only if you buy Pro) | To keep your Pro unlock working even when the payment service is briefly unreachable. | `chrome.storage.local`. |
 
 That's the complete list. Nothing else is captured.
 

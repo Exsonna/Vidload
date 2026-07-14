@@ -647,24 +647,16 @@ function maybeProbeMetadata(item, refs) {
 }
 
 // =============================================================================
-// Free-trial countdown banner (top of popup). Ticks every second while open.
+// Free-quota banner (top of popup). Shows how many free downloads remain and
+// nudges toward the one-time upgrade; becomes a tap-to-upgrade prompt at zero.
 // =============================================================================
-let trialTimer = null;
-
-function formatCountdown(ms) {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  const d = Math.floor(s / 86400);
-  const h = Math.floor((s % 86400) / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  if (d > 0) return `${d}d ${h}h ${m}m ${sec}s`;
-  if (h > 0) return `${h}h ${m}m ${sec}s`;
-  return `${m}m ${sec}s`;
+function remainingFree(status) {
+  if (status?.remaining != null) return status.remaining;
+  return Math.max(0, (status?.limit || 0) - (status?.used || 0));
 }
 
-function renderTrialBanner(status) {
+function renderQuotaBanner(status) {
   if (!trialBannerEl) return;
-  if (trialTimer) { clearInterval(trialTimer); trialTimer = null; }
   const textEl = trialBannerEl.querySelector('.trial-banner-text');
 
   // Nothing to show when monetization is off or the user has already paid.
@@ -673,39 +665,34 @@ function renderTrialBanner(status) {
     return;
   }
 
-  if (status.trialActive && status.trialEndsAt) {
-    trialBannerEl.hidden = false;
-    trialBannerEl.className = 'trial';
-    const tick = () => {
-      const ms = status.trialEndsAt - Date.now();
-      if (ms <= 0) {
-        clearInterval(trialTimer);
-        trialTimer = null;
-        renderTrialBanner({ ...status, trialActive: false });
-        return;
-      }
-      if (textEl) textEl.textContent = `✨ Free trial — ${formatCountdown(ms)} left · unlimited downloads`;
-    };
-    tick();
-    trialTimer = setInterval(tick, 1000);
-  } else {
-    // Trial over → nudge to upgrade. Click opens the paywall.
-    trialBannerEl.hidden = false;
+  const remaining = remainingFree(status);
+  const price = (status.priceLabel || '$4.99').replace(/\s+one-time.*$/i, '');
+  trialBannerEl.hidden = false;
+  if (remaining <= 0) {
     trialBannerEl.className = 'ended';
-    if (textEl) textEl.textContent = '⏳ Free trial ended — tap to upgrade for unlimited downloads';
+    if (textEl) textEl.textContent = `🔒 Free downloads used up — tap to unlock unlimited for ${price}`;
+  } else if (remaining <= 3) {
+    trialBannerEl.className = 'ended';
+    if (textEl) textEl.textContent = `⏳ Only ${remaining} free download${remaining === 1 ? '' : 's'} left — unlock unlimited for ${price}`;
+  } else {
+    trialBannerEl.className = 'trial';
+    if (textEl) textEl.textContent = `✨ ${remaining} free downloads left · ${price} unlocks unlimited forever`;
   }
 }
 
 trialBannerEl?.addEventListener('click', () => {
-  if (trialBannerEl.classList.contains('ended')) showPaywall(tierStatus);
+  if (!tierStatus?.paid) showPaywall(tierStatus); // any state → open the upgrade sheet
 });
 
 function renderTier(status) {
   if (!tierBadgeEl) return;
   tierStatus = status || tierStatus;
-  // Upgrade link: visible whenever monetization is on and the user hasn't paid
-  // (during the trial AND the free tier) so keen users can buy any time.
-  if (upgradeLinkEl) upgradeLinkEl.hidden = !(status?.monetizationEnabled && !status.paid);
+  // Upgrade link: visible whenever monetization is on and the user hasn't paid,
+  // with a concrete benefit line so the CTA isn't a bare word.
+  if (upgradeLinkEl) {
+    upgradeLinkEl.hidden = !(status?.monetizationEnabled && !status.paid);
+    upgradeLinkEl.title = 'No limits · one-time $4.99 · no subscription';
+  }
   if (!status?.monetizationEnabled) {
     tierBadgeEl.hidden = true;
     return;
@@ -715,15 +702,11 @@ function renderTier(status) {
     tierBadgeEl.textContent = 'Pro';
     tierBadgeEl.className = 'pro';
     tierBadgeEl.title = 'Unlimited downloads';
-  } else if (status.trialActive) {
-    const d = status.trialDaysLeft;
-    tierBadgeEl.textContent = `Trial · ${d}d`;
-    tierBadgeEl.className = 'trial';
-    tierBadgeEl.title = `Free trial — ${d} day${d === 1 ? '' : 's'} left. Unlimited downloads until then.`;
   } else {
+    const remaining = remainingFree(status);
     tierBadgeEl.textContent = `Free · ${status.used}/${status.limit}`;
     tierBadgeEl.className = 'free';
-    tierBadgeEl.title = `${status.used} of ${status.limit} free downloads used today.`;
+    tierBadgeEl.title = `${remaining} of ${status.limit} free downloads left. Unlock unlimited for $4.99 (one-time).`;
   }
 }
 
@@ -733,14 +716,19 @@ function showPaywall(detail) {
   if (listEl) listEl.hidden = true;
   if (footerEl) footerEl.hidden = true;
   if (detail && paywallDetailEl) {
-    paywallDetailEl.textContent = `You've used ${detail.used} of ${detail.limit} free downloads today.`;
+    const limit = detail.limit != null ? detail.limit : (tierStatus?.limit ?? 0);
+    const used = detail.used != null ? detail.used : (tierStatus?.used ?? 0);
+    const remaining = Math.max(0, limit - used);
+    paywallDetailEl.textContent = remaining > 0
+      ? `You have ${remaining} free download${remaining === 1 ? '' : 's'} left — unlock now so you never hit a limit.`
+      : `You've used all ${limit} free downloads. Unlock unlimited to keep going.`;
   }
-  if (detail?.priceLabel && paywallPriceEl) {
-    paywallPriceEl.textContent = detail.priceLabel.replace(/\s+one-time.*$/i, '') || '$4.99';
+  if ((detail?.priceLabel || tierStatus?.priceLabel) && paywallPriceEl) {
+    paywallPriceEl.textContent = (detail?.priceLabel || tierStatus?.priceLabel).replace(/\s+one-time.*$/i, '') || '$4.99';
   }
   if (paywallFootEl) {
     paywallFootEl.textContent = tierStatus?.monetizationEnabled
-      ? 'Counter resets at midnight local time.'
+      ? 'One-time payment · unlimited forever · no subscription.'
       : 'Monetization is disabled in this build — this is a preview of the paywall UI.';
   }
 }
@@ -755,10 +743,14 @@ async function openPaymentPage() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'open-payment-page' });
     if (!res?.ok) {
-      if (paywallFootEl) paywallFootEl.textContent = res?.error || 'Could not open payment page.';
+      const msg = res?.error || 'Could not open the checkout page. Please try again.';
+      // Surface the failure visibly no matter which CTA was clicked — the paywall
+      // footer is hidden when the header "Upgrade" link is the trigger.
+      if (paywallFootEl && paywallEl && !paywallEl.hidden) paywallFootEl.textContent = msg;
+      else showError(`Upgrade: ${msg}`);
       return;
     }
-    window.close(); // ExtPay checkout opens in its own tab
+    window.close(); // checkout confirmed open in its own tab
   } catch (err) {
     showError(`Upgrade click failed: ${err?.message || err}`);
   }
@@ -953,7 +945,7 @@ toggleEl?.addEventListener('click', () => {
 async function refreshTier() {
   try {
     const status = await chrome.runtime.sendMessage({ type: 'get-status' });
-    if (status) { renderTier(status); renderTrialBanner(status); }
+    if (status) { renderTier(status); renderQuotaBanner(status); }
     return status;
   } catch (err) {
     console.debug('VidLoad: get-status failed', err?.message || err);
@@ -1052,6 +1044,15 @@ async function startDownload(item, btn, opts = {}) {
     showError(`Download click failed: ${err?.message || err}`);
   }
 }
+
+// Live unlock: when the SW confirms payment (onPaid), drop the paywall and
+// refresh the tier immediately instead of waiting for the next popup open.
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === 'paid-status-changed' && msg.paid) {
+    hidePaywall();
+    refreshTier();
+  }
+});
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (!msg?.jobId) return;

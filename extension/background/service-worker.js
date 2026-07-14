@@ -173,18 +173,21 @@ chrome.runtime.onStartup.addListener(() => setupRefererRules());
 // =============================================================================
 // Monetization configuration — see wiki/topics/monetization.md
 // =============================================================================
+// Model: everyone gets `freeLifetimeLimit` free downloads to prove the tool
+// works, then a one-time $4.99 unlock for unlimited. The free counter is a
+// LIFETIME accumulator — NO daily reset, NO timed trial — so every retained
+// user reaches the paywall exactly once, at their moment of demonstrated value.
+// (Previously a 7-day unlimited trial + 3/day daily-reset tier meant the paywall
+// almost never fired; see the monetization audit in wiki/topics/monetization.md.)
 const MONETIZATION = {
   enabled: true,                     // LIVE — ExtPay configured (extpayId below)
   extpayId: 'vidload',               // matches the Extension ID at extensionpay.com
-  trialDays: 7,                      // free-trial length
-  // Bump this string to grant EVERY user a fresh `trialDays` trial — e.g. after
-  // shipping major fixes ("here's another week on us"). Each user re-grants
-  // once per new id, on their next status check. Current value re-grants for
-  // the v0.4.14–v0.4.22 reliability overhaul.
-  trialResetId: 'reliability-2026-06',
-  freeDailyLimit: 3,                 // downloads/day after the trial expires
+  freeLifetimeLimit: 10,             // total free downloads before the paywall
   priceLabel: '$4.99 one-time',      // shown in the paywall UI
 };
+
+const DOWNLOAD_COUNTER_KEY = 'vidload_downloads';
+const PAID_CACHE_KEY = 'vidload_paid_cache'; // last-known paid=true, for offline fail-open
 
 let extpay = null;
 if (MONETIZATION.enabled && typeof ExtPay === 'function') {
@@ -192,31 +195,17 @@ if (MONETIZATION.enabled && typeof ExtPay === 'function') {
   extpay.startBackground();
   extpay.onPaid.addListener((user) => {
     console.log('[VidLoad] payment received', user);
+    // Cache the paid flag so an offline/unreachable ExtPay never re-gates a
+    // confirmed payer, and tell any open popup to unlock immediately.
+    chrome.storage.local.set({ [PAID_CACHE_KEY]: true }).catch(() => {});
+    chrome.runtime.sendMessage({ type: 'paid-status-changed', paid: true }).catch(() => {});
   });
 }
 
-const DOWNLOAD_COUNTER_KEY = 'vidload_downloads';
-const TRIAL_START_KEY = 'vidload_trial_start';
-const TRIAL_RESET_KEY = 'vidload_trial_reset';
-const DAY_MS = 86_400_000;
-
-function todayKey() {
-  // Local calendar date (YYYY-MM-DD) so the daily counter resets at the user's
-  // local midnight — matching the "resets at midnight local time" popup copy.
-  const d = new Date();
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
-async function getDownloadStats() {
-  const today = todayKey();
+// Lifetime free-download count (persisted; never reset on a new day).
+async function getDownloadCount() {
   const stored = await chrome.storage.local.get(DOWNLOAD_COUNTER_KEY);
-  const data = stored[DOWNLOAD_COUNTER_KEY] || { date: today, count: 0 };
-  if (data.date !== today) {
-    data.date = today;
-    data.count = 0;
-  }
-  return data;
+  return stored[DOWNLOAD_COUNTER_KEY]?.count || 0;
 }
 
 // Free-tier quota is a shared resource across concurrent downloads. Serialize
@@ -240,9 +229,8 @@ let pendingMetered = 0;
 function commitMeteredDownload() {
   return withQuota(async () => {
     if (pendingMetered > 0) pendingMetered -= 1;
-    const data = await getDownloadStats();
-    data.count += 1;
-    await chrome.storage.local.set({ [DOWNLOAD_COUNTER_KEY]: data });
+    const count = await getDownloadCount();
+    await chrome.storage.local.set({ [DOWNLOAD_COUNTER_KEY]: { count: count + 1 } });
   });
 }
 
@@ -256,66 +244,35 @@ async function isPaid() {
   if (!extpay) return false;
   try {
     const user = await extpay.getUser();
-    return !!user.paid;
+    const paid = !!user.paid;
+    // Remember a confirmed payer so a later ExtPay outage can't re-gate them.
+    if (paid) chrome.storage.local.set({ [PAID_CACHE_KEY]: true }).catch(() => {});
+    return paid;
   } catch (err) {
     console.error('[VidLoad] paid check failed', err);
-    return false;
+    // Fail OPEN for a previously-confirmed payer (ExtPay unreachable / offline /
+    // the sync window right after purchase) so they never see "I paid but it's
+    // still locked". A never-paid user has no cache and stays gated (fail closed).
+    const cached = await chrome.storage.local.get(PAID_CACHE_KEY);
+    return !!cached[PAID_CACHE_KEY];
   }
-}
-
-// The trial clock starts the first time monetization is active for a user, and
-// re-starts whenever MONETIZATION.trialResetId changes (a "free trial for
-// everyone" grant after major fixes). Stored in chrome.storage.local so it
-// survives SW restarts. Paid users never reach this — isPaid() short-circuits.
-async function getTrialStatus() {
-  if (!MONETIZATION.enabled) return { active: false, daysLeft: 0, endsAt: 0, msLeft: 0 };
-  const stored = await chrome.storage.local.get([TRIAL_START_KEY, TRIAL_RESET_KEY]);
-  let start = stored[TRIAL_START_KEY];
-  if (!start || stored[TRIAL_RESET_KEY] !== MONETIZATION.trialResetId) {
-    start = Date.now();
-    try {
-      await chrome.storage.local.set({
-        [TRIAL_START_KEY]: start,
-        [TRIAL_RESET_KEY]: MONETIZATION.trialResetId,
-      });
-      console.log(`[VidLoad] Free trial granted (${MONETIZATION.trialDays}d, id=${MONETIZATION.trialResetId})`);
-    } catch (err) {
-      console.error('[VidLoad] trial start write failed', err);
-    }
-  }
-  const endsAt = start + MONETIZATION.trialDays * DAY_MS;
-  const msLeft = endsAt - Date.now();
-  if (msLeft <= 0) return { active: false, daysLeft: 0, endsAt, msLeft: 0 };
-  // Whole days remaining, floored, so the badge ("Trial · 6d") agrees with the
-  // popup countdown ("6d 23h …") instead of rounding up to a phantom extra day.
-  return { active: true, daysLeft: Math.max(1, Math.floor(msLeft / DAY_MS)), endsAt, msLeft };
 }
 
 // Decide whether a download is allowed. For the metered free tier this also
 // RESERVES a quota slot atomically (under withQuota) so concurrent downloads
 // can't both slip past the limit. A reserved slot must later be committed
 // (commitMeteredDownload) on success or released (releaseMeteredReservation)
-// on failure. Trial/paid downloads are unmetered and reserve nothing.
+// on failure. Paid downloads are unmetered and reserve nothing.
 async function gateDownload() {
   if (await isPaid()) return { allowed: true, paid: true, metered: false };
-  const trial = await getTrialStatus();
-  if (trial.active) {
-    return {
-      allowed: true,
-      paid: false,
-      trialActive: true,
-      trialDaysLeft: trial.daysLeft,
-      metered: false,
-    };
-  }
   return withQuota(async () => {
-    const data = await getDownloadStats();
-    const used = data.count + pendingMetered;
-    if (used >= MONETIZATION.freeDailyLimit) {
+    const count = await getDownloadCount();
+    const used = count + pendingMetered;
+    if (used >= MONETIZATION.freeLifetimeLimit) {
       return {
         allowed: false,
         paid: false,
-        limit: MONETIZATION.freeDailyLimit,
+        limit: MONETIZATION.freeLifetimeLimit,
         used,
         priceLabel: MONETIZATION.priceLabel,
         metered: false,
@@ -325,7 +282,7 @@ async function gateDownload() {
     return {
       allowed: true,
       paid: false,
-      limit: MONETIZATION.freeDailyLimit,
+      limit: MONETIZATION.freeLifetimeLimit,
       used,
       metered: true,
     };
@@ -693,19 +650,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg?.type === 'get-status') {
     (async () => {
-      const data = await getDownloadStats();
+      const count = await getDownloadCount();
       const paid = await isPaid();
-      const trial = await getTrialStatus();
+      const limit = MONETIZATION.freeLifetimeLimit;
       sendResponse({
         monetizationEnabled: MONETIZATION.enabled,
         paid,
-        trialActive: trial.active,
-        trialDaysLeft: trial.daysLeft,
-        trialTotalDays: MONETIZATION.trialDays,
-        trialEndsAt: trial.endsAt || 0,
-        trialMsLeft: trial.msLeft || 0,
-        limit: MONETIZATION.freeDailyLimit,
-        used: data.count,
+        limit,
+        used: count,
+        remaining: Math.max(0, limit - count),
         priceLabel: MONETIZATION.priceLabel,
       });
     })();
@@ -713,18 +666,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg?.type === 'open-payment-page') {
-    if (extpay) {
-      extpay.openPaymentPage();
-      sendResponse({ ok: true });
-    } else {
-      sendResponse({
-        ok: false,
-        error: MONETIZATION.enabled
-          ? 'ExtPay not initialized'
-          : 'Monetization is disabled in this build',
-      });
-    }
-    return false;
+    // Await the checkout tab actually opening before reporting success, so the
+    // popup doesn't close on a silent failure (a lost high-intent buyer).
+    (async () => {
+      if (!extpay) {
+        sendResponse({
+          ok: false,
+          error: MONETIZATION.enabled ? 'ExtPay not initialized' : 'Monetization is disabled in this build',
+        });
+        return;
+      }
+      try {
+        await extpay.openPaymentPage();
+        sendResponse({ ok: true });
+      } catch (err) {
+        sendResponse({ ok: false, error: String(err?.message || err) });
+      }
+    })();
+    return true;
   }
 
   if (msg?.type === 'media-found' && sender.tab?.id !== undefined) {

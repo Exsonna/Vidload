@@ -1,19 +1,18 @@
 # Monetization design — ExtensionPay $4.99 one-time
 
-## Status: LIVE (v0.4.24, activated 2026-06-11)
+## Status: LIVE — lifetime-cap model (v0.4.29)
 
 `MONETIZATION.enabled = true`. The real ExtensionPay SDK (Glench/ExtPay, ISC) is vendored at `lib/extpay.js` (replaced the stub), the required `extensionpay.com` content script is registered in both builds, `extpayId='vidload'` matches the registered extension, and a Stripe-test-card payment was verified end-to-end (checkout → `extensionpay.com` content script → Pro unlock). Test mode auto-disables once installed from the store (not unpacked).
 
-## Decision
+## Decision (v0.4.29 — replaced the trial/daily model)
 
-VidLoad monetizes via **ExtensionPay** with a free trial, a free tier, and a one-time unlock:
+VidLoad monetizes via **ExtensionPay** with an accumulating free cap and a one-time unlock:
 
-- **Free trial**: 7 days of unlimited downloads. Starts the first time monetization is active for a user and **re-grants on every `trialResetId` change** (see Trial timer). Downloads during the trial do **not** count against any daily quota.
-- **Free tier (post-trial)**: 3 downloads per day (counter resets at midnight local time).
-- **Pro**: $4.99 one-time → lifetime unlimited downloads. An always-visible **"Upgrade ✨"** link in the popup header (shown to any non-paid user) opens ExtPay checkout directly; a **live countdown header** ticks down the trial.
+- **Free tier**: **10 lifetime free downloads** — a single accumulating counter, **no daily reset and no timed trial**. Every download (direct/HLS/DASH/AV) counts, metered on *success*.
+- **Pro**: $4.99 one-time → unlimited downloads forever, no subscription. An always-visible **"Upgrade ✨"** link (with a "no limits · one-time $4.99 · no subscription" tooltip) and a top **free-quota banner** ("N free downloads left …" → "used up — tap to unlock") drive conversion.
 - **Stripe** handles payments via ExtensionPay; we don't run our own backend.
 
-To re-grant everyone another free trial after a big fix, bump `MONETIZATION.trialResetId`. To roll back monetization, set `enabled = false`.
+**Why this shape** (see the monetization audit, 2026-07): the old *7-day unlimited trial + 3/day daily-reset* model meant the paywall almost never fired — a daily-resetting 3/day is ~90 free/month, the median downloader never hit it, and each `trialResetId` bump re-granted everyone another free week. Zero paid conversions was the predictable output. A lifetime cap makes **every retained user reach the paywall exactly once**, at their moment of demonstrated value. To roll back monetization, set `enabled = false`. To tune, change `freeLifetimeLimit`.
 
 ## Why ExtensionPay
 
@@ -44,7 +43,7 @@ For a solo dev validating paid demand, ExtPay's overhead is well worth the ~5% o
 │  - MONETIZATION { enabled, extpayId, limit, ... }│
 │  - importScripts('lib/extpay.js')               │
 │  - gateDownload() before every Download         │
-│    → isPaid() ? proceed : check daily counter   │
+│    → isPaid() ? proceed : check lifetime counter │
 │  - 'open-payment-page' → extpay.openPaymentPage()│
 └─────────────────┬───────────────────────────────┘
                   │ extpay.getUser() / Stripe checkout
@@ -57,34 +56,23 @@ For a solo dev validating paid demand, ExtPay's overhead is well worth the ~5% o
 └─────────────────────────────────────────────────┘
 ```
 
-## Free-tier counter
+## Free-tier counter (lifetime, v0.4.29)
 
 Stored in `chrome.storage.local` under `vidload_downloads`:
 
 ```js
-{ date: '2026-05-14', count: 2 }
+{ count: 7 }   // lifetime free downloads used — never reset on a new day
 ```
 
-Counter increments after each successful `chrome.downloads.download()` call (or successful HLS/DASH job start) **only when `gate.metered === true`** — i.e. only when the user is on the free tier. Trial and Pro downloads bypass the counter entirely, so day 8 starts at 0 regardless of trial-day activity.
+`getDownloadCount()` reads `.count`; `commitMeteredDownload()` writes `{ count: count + 1 }`. The counter increments **only on a successful download** and **only when `gate.metered === true`** (a non-paid user under the cap). Concurrent downloads are serialized through `withQuota` + a `pendingMetered` reservation so they can't oversubscribe the cap. Pro downloads bypass the counter entirely.
 
-On midnight local time the date check triggers a reset to 0.
+`gateDownload()` blocks (`allowed:false → 'paywall'`) once `count + pendingMetered >= freeLifetimeLimit` (10).
 
-## Trial timer (v0.4.23 rewrite — reset-id based)
+**Migration from the old daily model:** old installs stored `{ date, count }`; `getDownloadCount()` reads `.count` from either shape and the next commit drops the `date` field. An existing user's prior count carries over (generously — their small daily count becomes part of the 10 lifetime). The old `vidload_trial_start` / `vidload_trial_reset` keys are simply ignored (harmless orphans).
 
-Stored in `chrome.storage.local`:
+## No timed trial (removed v0.4.29)
 
-```js
-{ vidload_trial_start: 1749600000000,   // ms epoch — when this trial began
-  vidload_trial_reset: 'reliability-2026-06' }  // which grant id is applied
-```
-
-`getTrialStatus()` lazily starts (or re-starts) the trial. On each call, if **no trial has started yet** OR the stored `vidload_trial_reset` differs from `MONETIZATION.trialResetId`, it sets `vidload_trial_start = now` and records the new reset id. So:
-
-- The clock starts the **first time monetization is active** for a user (not at install) — i.e. when you flip `enabled = true` and ship, everyone gets a clean `trialDays` from that moment.
-- **To grant every user another fresh trial** (e.g. "we fixed major bugs, here's another week"), just **bump `MONETIZATION.trialResetId`** to a new string and ship. Each user re-grants exactly once per new id, on their next popup open / download. Current value `reliability-2026-06` re-grants for the v0.4.14–v0.4.22 overhaul.
-- Paid users never reach this — `isPaid()` short-circuits `gateDownload()`.
-
-`getTrialStatus()` returns `{ active, daysLeft, endsAt, msLeft }`. `endsAt` drives the popup's live **countdown header** (`#trial-banner`), which ticks every second while the popup is open and flips to a tap-to-upgrade banner when the trial ends.
+The 7-day unlimited trial and the `trialResetId` re-grant mechanism were **removed** — they gave away the highest-intent first-use for free and repeatedly pushed the paywall out of reach (see the audit rationale under Decision). The 10 free lifetime downloads *are* the trial now: enough to prove the tool works, finite enough that a retained user hits the wall once. `#trial-banner` was repurposed from a countdown into the free-quota nudge.
 
 ## Configuration toggle
 
@@ -92,16 +80,14 @@ Stored in `chrome.storage.local`:
 
 ```js
 const MONETIZATION = {
-  enabled: false,                    // master switch — flip after ExtPay setup
+  enabled: true,                     // master switch
   extpayId: 'vidload',               // from extensionpay.com dashboard
-  trialDays: 7,                      // free-trial length
-  trialResetId: 'reliability-2026-06', // bump to re-grant everyone a fresh trial
-  freeDailyLimit: 3,                 // downloads/day after the trial expires
+  freeLifetimeLimit: 10,             // total free downloads before the paywall
   priceLabel: '$4.99 one-time',
 };
 ```
 
-When `enabled: false` (the current default), `gateDownload()` short-circuits — everything is free, the tier badge in the popup header is hidden. The paywall UI still exists in the popup but only renders if a download is explicitly rejected.
+When `enabled: false`, `isPaid()` returns `true` for everyone — `gateDownload()` short-circuits, everything is free, and the tier badge in the popup header is hidden. The paywall UI still exists in the popup but only renders if a download is explicitly rejected.
 
 ## Setup steps (for the project owner)
 
@@ -117,7 +103,7 @@ When `enabled: false` (the current default), `gateDownload()` short-circuits —
 8. **Rebuild**: `node build.mjs`
 9. **Load** `dist/webstore/` or `dist/selfhost/` as an unpacked extension and verify:
    - Tier badge appears in popup header
-   - Downloads are gated after 3 per day
+   - Downloads are gated after 10 lifetime free downloads
    - Upgrade button opens the ExtPay payment page in a new tab
    - After a successful test charge, badge flips to "Pro" and gating disappears
 
@@ -127,11 +113,11 @@ When `enabled: false` (the current default), `gateDownload()` short-circuits —
 
 ## What if the user wipes storage?
 
-The daily counter lives in `chrome.storage.local`, which persists across SW restarts but is wiped on extension uninstall. Reinstalling resets the counter — but the paid status on ExtPay's backend is tied to a per-extension user ID that persists, so a paid user remains paid after reinstall.
+The lifetime counter lives in `chrome.storage.local`, wiped on uninstall — so uninstall+reinstall (or a manual "Clear data") resets the 10-download allowance. This is the inherent limit of client-side gating: the download *count* isn't stored server-side, so a determined user can reset it. The monetization audit accepted this (fully client-side metering is unwinnable); the funnel *shape* is the lever, and most users won't bother. Paid status, by contrast, is tied to a per-extension ExtPay user ID that persists server-side, so **a paid user stays paid after reinstall**. (A future hardening could meter against ExtPay's server-side `installedAt`, but that needs a backend we don't run.)
 
 ## What if ExtPay is down?
 
-`isPaid()` fails closed — if `extpay.getUser()` throws, we report `paid: false`. The user falls back to the free tier. We don't break downloads entirely on an ExtPay outage; we just temporarily lose access to the "Pro" status until ExtPay recovers.
+`isPaid()` **fails open for a previously-confirmed payer** and closed for everyone else (v0.4.29). We cache `vidload_paid_cache = true` the moment `getUser().paid` is true (and in the `onPaid` listener); if a later `getUser()` throws (offline / ExtPay outage / the sync window right after purchase), a cached payer stays Pro instead of being re-gated with "I paid but it's still locked". A never-paid user has no cache and correctly falls back to the free tier.
 
 ## See also
 

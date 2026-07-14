@@ -41,13 +41,15 @@ Each shot should tell one clear story. Keep them in this order — the first one
 
 **Annotation:** "VidLoad reads page context to name your downloads — no more abc123.mp4."
 
-### 5. Free trial + Pro upgrade — "Try free, unlock forever"
+### 5. Free downloads + Pro upgrade — "Start free, unlock forever"
 
-**Scene:** Popup with the blue "Trial · 5d" badge visible in the header, plus the paywall sheet open showing "$4.99 · One-time payment · Lifetime unlimited downloads."
+**Scene:** Popup with the "Free · 3/10" badge visible in the header and the free-quota banner ("✨ 7 free downloads left · $4.99 unlocks unlimited forever"), plus the paywall sheet open showing "$4.99 · One-time payment · lifetime unlimited downloads."
 
-**Annotation:** "7 days free. Unlock forever for $4.99."
+**Annotation:** "10 free downloads. Unlock forever for $4.99 — no subscription."
 
 > Only include this shot if `MONETIZATION.enabled = true` in the build you submit. Skip if shipping with monetization disabled.
+>
+> ⚠ v0.4.29 model change: the existing generated `05-trial-upgrade.png` still shows the old "Trial · 5d" badge — re-shoot it against the new UI before uploading, or drop it from the carousel.
 
 ## How to take the shots
 

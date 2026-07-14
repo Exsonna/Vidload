@@ -29,6 +29,7 @@ body {
   text-align: center;
   letter-spacing: 0.2px;
   color: #fff;
+  cursor: pointer;
 }
 
 #trial-banner.trial {
@@ -40,7 +41,7 @@ body {
   cursor: pointer;
 }
 
-#trial-banner.ended:hover { filter: brightness(1.05); }
+#trial-banner:hover { filter: brightness(1.05); }
 
 #trial-banner .trial-banner-text { font-variant-numeric: tabular-nums; }
 

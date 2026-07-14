@@ -18,7 +18,7 @@
           </nav>
         </div>
         <h1>Privacy Policy</h1>
-        <p>Effective date: May 18, 2026</p>
+        <p>Effective date: July 14, 2026</p>
       </div>
     </header>
     <main class="wrap">
@@ -60,13 +60,13 @@
               <td><code>chrome.storage.local</code>, until uninstall or manual clearing.</td>
             </tr>
             <tr>
-              <td>Daily download count, if monetization is active</td>
-              <td>Enforce the free-tier daily limit.</td>
+              <td>Free-download count, if monetization is active</td>
+              <td>Track how many of the free downloads you've used.</td>
               <td><code>chrome.storage.local</code>.</td>
             </tr>
             <tr>
-              <td>Install timestamp, if monetization is active</td>
-              <td>Track the free-trial period.</td>
+              <td>Purchase-status flag, only if you buy Pro</td>
+              <td>Keep your Pro unlock working even when the payment service is briefly unreachable.</td>
               <td><code>chrome.storage.local</code>.</td>
             </tr>
           </tbody>
@@ -87,7 +87,7 @@
         <h2>Permissions</h2>
         <ul>
           <li><code>downloads</code>: save the selected video file.</li>
-          <li><code>storage</code>: remember renamed labels, dismissed items, trial timer, and daily count.</li>
+          <li><code>storage</code>: remember renamed labels, dismissed items, the free-download count, and purchase status.</li>
           <li><code>webRequest</code>: detect video streams loaded by webpages by observing response headers.</li>
           <li><code>offscreen</code>: keep long-running stream-download jobs alive past service worker idle timeouts.</li>
           <li><code>declarativeNetRequestWithHostAccess</code>: rewrite Referer headers for extension-originated CDN requests when needed.</li>

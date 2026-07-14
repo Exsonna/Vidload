@@ -48,8 +48,8 @@ WHAT MAKES IT DIFFERENT
 - Quality picker. When a site offers multiple resolutions, VidLoad shows them in a dropdown so you can pick 1080p, 720p, or any other variant.
 - Smart filenames. VidLoad reads the surrounding page (titles, captions, author handles) to give your saved file a meaningful name instead of an opaque ID.
 - Clean popup. Sub-segments and probe responses are filtered out so you only see real videos. Items you dismiss or rename stay that way.
-- Free trial. Every new install gets 7 days of unlimited downloads — no credit card, no signup.
-- One-time purchase. After the trial, free tier allows 3 downloads per day. Unlock unlimited downloads forever for a single $4.99 payment. No subscription.
+- Free to start. Your first 10 downloads are free — no credit card, no signup, no time limit.
+- One-time purchase. Unlock unlimited downloads forever with a single $4.99 payment. No subscription, no recurring charges.
 
 PRIVACY
 
@@ -109,7 +109,7 @@ Each permission in `manifest.json` needs a one-sentence reason. Paste these into
 | Permission | Justification |
 |---|---|
 | `downloads` | Required to save the user's chosen video file to their computer via `chrome.downloads.download()`. |
-| `storage` | Required to remember the user's renamed labels, dismissed items, and (if monetization is active) trial timer and daily download count across browser sessions. |
+| `storage` | Required to remember the user's renamed labels, dismissed items, and (if monetization is active) the free-download count and purchase status across browser sessions. |
 | `webRequest` | Required to detect video stream URLs as they load on the page, so the user can save streams the page doesn't expose via a `<video>` element. We only observe response headers — we never modify or block requests via webRequest. |
 | `offscreen` | Required because HLS and DASH downloads require many sequential `fetch` calls that outlive the service worker's 30-second idle timeout. The offscreen document keeps the download job alive until completion. |
 | `declarativeNetRequestWithHostAccess` | Required to rewrite the `Referer` header for video CDN requests originating from the extension. Many video CDNs reject requests where the Referer is a `chrome-extension://` URL. The rewrite is scoped to extension-originated requests only (`tabIds: [-1]`); the user's normal browsing is unaffected. |
