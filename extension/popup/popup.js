@@ -761,12 +761,27 @@ upgradeLinkEl?.addEventListener('click', openPaymentPage);
 
 paywallBackBtn?.addEventListener('click', () => hidePaywall());
 
+// When set, the popup shows this reason instead of any downloadable items —
+// used for pages this build must not serve. Set via window.vidloadDisableDownloads
+// (below); kept generic so no site-specific names live in this file.
+let downloadsDisabledReason = null;
+
 function render() {
   if (!listEl || !statusEl) {
     showError('Cannot render — list or status element missing.');
     return;
   }
   rowsByUrl.clear(); // rebuilt as rows are created below
+  if (downloadsDisabledReason) {
+    listEl.replaceChildren();
+    statusEl.textContent = downloadsDisabledReason;
+    if (toggleEl) toggleEl.hidden = true;
+    // Drop the monetization chrome too — no downloads here, so no quota/upgrade.
+    if (trialBannerEl) trialBannerEl.hidden = true;
+    if (tierBadgeEl) tierBadgeEl.hidden = true;
+    if (upgradeLinkEl) upgradeLinkEl.hidden = true;
+    return;
+  }
   try {
     const filtered = allItems.filter((it) => it && !dismissed.has(it.url));
     const visible = showHidden ? filtered : filtered.filter((it) => !isFilteredOut(it));
@@ -808,6 +823,13 @@ function render() {
     showError(`Render failed: ${err?.message || err}\n${err?.stack || ''}`);
   }
 }
+
+// Generic hook: a sibling popup script (e.g. the build-aware notice) can disable
+// the download list on a page this build can't serve, passing a reason to show.
+window.vidloadDisableDownloads = (reason) => {
+  downloadsDisabledReason = reason || 'Downloads are not available on this page.';
+  try { render(); } catch (_) { /* render guards its own errors */ }
+};
 
 function renderRow(item) {
   if (!tpl || !listEl) return;
