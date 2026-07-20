@@ -261,18 +261,80 @@ function looksLikeStreamSegment(item) {
   return self.VidLoadUrl.isStreamSegmentUrl(item.url); // shared with the SW
 }
 
+// Collapse several detected URLs that are the SAME source video into one row.
+// Twitter/X serves one clip as multiple sibling master playlists (different
+// tokens/paths) plus tiny probe responses, so the master→child collapse alone
+// leaves 4–5 duplicate rows. Group by a stable per-video id and keep the single
+// best row (a probed master with a quality picker wins). Recomputed each render.
+let collapsedUrls = new Set();
+
+function videoGroupKey(item) {
+  try {
+    const u = new URL(item.url);
+    // Every playlist + mp4 for one tweet video shares this path prefix.
+    if (/(^|\.)twimg\.com$/i.test(u.hostname)) {
+      const m = u.pathname.match(/\/(amplify_video|ext_tw_video|tweet_video)\/(\d+)\//);
+      if (m) return `twimg:${m[2]}`;
+    }
+  } catch {}
+  return null; // only group hosts we can identify confidently — never over-collapse
+}
+
+// A row worth keeping as a group's representative (excludes probes/segments so a
+// real playlist always wins the group and it never collapses to nothing).
+function collapsibleCandidate(it) {
+  if (!it) return false;
+  if (looksLikeStreamSegment(it)) return false;
+  if (it.kind === 'direct' && it.source === 'network' && it.bytes != null && it.bytes < MIN_DIRECT_BYTES) return false;
+  return true;
+}
+
+// Higher = keep. Prefer a probed master with a real quality picker, then any
+// playlist over a progressive mp4, then a master-looking URL (no WxH in path),
+// then the larger file.
+function keepScore(item) {
+  let s = 0;
+  if (item.variants && item.variants.length > 1) s += 1000;
+  if (item.kind === 'hls' || item.kind === 'dash') s += 100;
+  try { if (!/\/\d{2,4}x\d{2,4}\//.test(new URL(item.url).pathname)) s += 40; } catch {}
+  s += Math.min(30, Math.round((item.estimatedBytes || item.bytes || 0) / 1e6));
+  return s;
+}
+
+function computeCollapsedUrls(items) {
+  const groups = new Map();
+  for (const it of items) {
+    if (!collapsibleCandidate(it)) continue;
+    const key = videoGroupKey(it);
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(it);
+  }
+  const hide = new Set();
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    let winner = group[0];
+    for (const it of group) if (keepScore(it) > keepScore(winner)) winner = it;
+    for (const it of group) if (it.url !== winner.url) hide.add(it.url);
+  }
+  return hide;
+}
+
 function isFilteredOut(item) {
   if (!item) return true;
+  // A duplicate URL for a video we're already showing (see computeCollapsedUrls).
+  if (collapsedUrls.has(item.url)) return true;
   // An HLS playlist that is a child (variant/audio) of a master we're already
   // showing — collapse it into the master row.
   if (item.kind === 'hls' && hlsChildKeys.has(playlistKey(item.url))) return true;
   if (item.kind !== 'direct') return false;
   if (item.source !== 'network') return false;
-  // .m4s / .ts are HLS/DASH sub-segments, never standalone videos. Hide them
-  // regardless of any duration/poster that got stamped on by context tracking.
+  // .m4s / .ts are HLS/DASH sub-segments, never standalone videos.
   if (looksLikeStreamSegment(item)) return true;
-  if (hasMetadata(item)) return false;
+  // A tiny "direct" response is a probe/redirect, not a video — hide it even if
+  // the active-context channel stamped a poster/duration onto it (the 786 B case).
   if (item.bytes != null && item.bytes < MIN_DIRECT_BYTES) return true;
+  if (hasMetadata(item)) return false;
   return false;
 }
 
@@ -784,6 +846,7 @@ function render() {
   }
   try {
     const filtered = allItems.filter((it) => it && !dismissed.has(it.url));
+    collapsedUrls = computeCollapsedUrls(filtered); // group same-video duplicates
     const visible = showHidden ? filtered : filtered.filter((it) => !isFilteredOut(it));
     const hiddenCount = filtered.length - visible.length;
 
