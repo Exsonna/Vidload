@@ -11,6 +11,11 @@ export function parseM3U8(text, baseUrl) {
     initSegment: null,
     targetDuration: 0,
     mediaSequence: 0,
+    // Alternate audio renditions from #EXT-X-MEDIA:TYPE=AUDIO. Split-track HLS
+    // (Twitter/X fmp4, some CDNs) keeps audio OUT of the video variants — a
+    // variant-only download is silent unless its audio rendition is fetched
+    // and muxed in. Each entry: { groupId, uri, isDefault }.
+    audioRenditions: [],
   };
 
   let pendingDuration = null;
@@ -36,6 +41,19 @@ export function parseM3U8(text, baseUrl) {
           bandwidth: parseInt(attrs.BANDWIDTH || '0', 10),
           resolution: attrs.RESOLUTION || null,
           codecs: attrs.CODECS || null,
+          audioGroup: attrs.AUDIO || null, // GROUP-ID of this variant's audio rendition
+        });
+      }
+      continue;
+    }
+
+    if (line.startsWith('#EXT-X-MEDIA')) {
+      const attrs = parseAttrs(line);
+      if ((attrs.TYPE || '').toUpperCase() === 'AUDIO' && attrs.URI) {
+        result.audioRenditions.push({
+          groupId: attrs['GROUP-ID'] || null,
+          uri: resolveUrl(attrs.URI, baseUrl),
+          isDefault: (attrs.DEFAULT || '').toUpperCase() === 'YES',
         });
       }
       continue;
@@ -165,6 +183,22 @@ function resolveUrl(uri, base) {
 
 export function pickBestVariant(variants) {
   return [...variants].sort((a, b) => b.bandwidth - a.bandwidth)[0];
+}
+
+// The audio rendition URL a given variant should be muxed with, or null when
+// the playlist has no separate audio (the common single-track case). Matches
+// the variant's AUDIO group id first (X names one group per bitrate ladder
+// rung, e.g. AUDIO="audio-128000"), preferring DEFAULT=YES inside the group,
+// then falls back to the master's default/first rendition.
+export function pickAudioRendition(master, variant) {
+  const renditions = master?.audioRenditions || [];
+  if (renditions.length === 0) return null;
+  const group = variant?.audioGroup
+    ? renditions.filter((r) => r.groupId === variant.audioGroup)
+    : [];
+  const pool = group.length ? group : renditions;
+  const chosen = pool.find((r) => r.isDefault) || pool[0];
+  return chosen?.uri || null;
 }
 
 export async function importAesKey(keyBytes) {

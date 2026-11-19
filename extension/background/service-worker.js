@@ -845,6 +845,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           format,
           jobId,
           url: msg.url,
+          // Split-track HLS: the popup's probe resolves the audio rendition for
+          // the chosen variant (the variant URL alone carries no audio info).
+          audioUrl: msg.audioUrl || null,
           filename: msg.filename,
           saveAs: !!msg.saveAs,
         });

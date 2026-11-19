@@ -35,6 +35,10 @@ If any of those land, the migration path is: introduce Vite + FFmpeg.wasm in a w
 - **Parallel fetches** — 5 segments at a time, retried twice on failure.
 - **Progress UI** — popup shows `N/M` while segments download.
 
+## Split-track audio (v0.4.32)
+
+X/Twitter's fmp4 HLS is **split-track**: `#EXT-X-STREAM-INF` variants (`/pl/avc1/<WxH>/…`) are video-only, and sound lives in separate `#EXT-X-MEDIA:TYPE=AUDIO` renditions (`/pl/mp4a/<bitrate>/…`), linked by the variant's `AUDIO="audio-<bitrate>"` group id. Downloading just the variant therefore produced a **silent MP4** (the original X complaint). Since v0.4.32: `parseM3U8` returns `audioRenditions` + per-variant `audioGroup`, `pickAudioRendition(master, variant)` resolves the matching rendition, `runHlsJob` downloads both tracks and muxes via the same `muxAvToMp4` used for split DASH (fail-soft to video-only with the "Saved without audio" warning). Because the popup's picker default-selects a bare variant URL (offscreen never sees the master on that path), the popup resolves and threads `audioUrl` through `download-stream`. Also fixed there: `muxAvToMp4` had been writing `hdlr="vide"` on audio tracks (mp4box's silent default — affected Reddit/DASH too); strict players drop such audio. Verified on a real X video: ffprobe shows h264 + AAC stereo streams, full decode clean.
+
 ## What v0.2 does NOT handle
 
 - **SAMPLE-AES** (Apple FairPlay-style encryption) — different decryption pipeline, deferred.

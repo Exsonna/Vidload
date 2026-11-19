@@ -566,6 +566,12 @@ async function parseHlsMetadata(text, baseUrl) {
   let height = null;
   let variants = [];
   const childUrls = []; // media/audio playlists referenced by a master
+  // Split-track HLS (X/Twitter fmp4): audio lives in #EXT-X-MEDIA renditions,
+  // keyed by GROUP-ID; each variant names its group via AUDIO="...". A variant
+  // downloaded without its rendition is SILENT, so capture the mapping here —
+  // the download path sends a bare variant URL that carries no audio info.
+  const audioByGroup = {}; // GROUP-ID -> absolute rendition playlist URL
+  let audioDefault = null; // first/DEFAULT rendition, as a fallback
 
   if (text.includes('#EXT-X-STREAM-INF')) {
     const lines = text.split(/\r?\n/);
@@ -573,12 +579,23 @@ async function parseHlsMetadata(text, baseUrl) {
       // Audio/subtitle renditions referenced by the master are children too.
       if (lines[i].startsWith('#EXT-X-MEDIA')) {
         const m = lines[i].match(/URI="([^"]+)"/);
-        if (m) { try { childUrls.push(new URL(m[1], baseUrl).href); } catch {} }
+        if (m) {
+          try {
+            const abs = new URL(m[1], baseUrl).href;
+            childUrls.push(abs);
+            if (/TYPE=AUDIO/i.test(lines[i])) {
+              const g = lines[i].match(/GROUP-ID="([^"]+)"/);
+              if (g) audioByGroup[g[1]] = abs;
+              if (!audioDefault || /DEFAULT=YES/i.test(lines[i])) audioDefault = abs;
+            }
+          } catch {}
+        }
         continue;
       }
       if (!lines[i].startsWith('#EXT-X-STREAM-INF')) continue;
       const bwMatch = lines[i].match(/BANDWIDTH=(\d+)/);
       const resMatch = lines[i].match(/RESOLUTION=(\d+)x(\d+)/);
+      const audioMatch = lines[i].match(/AUDIO="([^"]+)"/);
       const bwVal = bwMatch ? parseInt(bwMatch[1], 10) : 0;
       let j = i + 1;
       while (j < lines.length && lines[j].trim().startsWith('#')) j++;
@@ -591,6 +608,7 @@ async function parseHlsMetadata(text, baseUrl) {
         bandwidth: bwVal || null,
         width: resMatch ? parseInt(resMatch[1], 10) : null,
         height: resMatch ? parseInt(resMatch[2], 10) : null,
+        audioGroup: audioMatch ? audioMatch[1] : null,
       });
       childUrls.push(url);
     }
@@ -602,7 +620,7 @@ async function parseHlsMetadata(text, baseUrl) {
     width = best.width;
     height = best.height;
     const res = await fetch(best.url, { credentials: 'include' });
-    if (!res.ok) return { duration: null, bandwidth, width, height, variants, childUrls, isMaster: true };
+    if (!res.ok) return { duration: null, bandwidth, width, height, variants, childUrls, audioByGroup, audioDefault, isMaster: true };
     text = await res.text();
   }
 
@@ -612,7 +630,7 @@ async function parseHlsMetadata(text, baseUrl) {
     if (m) total += parseFloat(m[1]);
   }
   const duration = total > 0 ? Math.round(total) : null;
-  return { duration, bandwidth, width, height, variants, childUrls, isMaster: variants.length > 0 };
+  return { duration, bandwidth, width, height, variants, childUrls, audioByGroup, audioDefault, isMaster: variants.length > 0 };
 }
 
 function parseDashMetadata(mpdText) {
@@ -694,6 +712,12 @@ function maybeProbeMetadata(item, refs) {
       if (meta.variants && meta.variants.length) {
         item.variants = meta.variants;
         if (refs.pickerEl?.isConnected) populateVariantPicker(item, refs.pickerEl);
+      }
+      // Remember the master's audio renditions so the download can pass the
+      // matching audio playlist along with a bare variant URL (split-track HLS).
+      if (meta.audioByGroup && Object.keys(meta.audioByGroup).length) {
+        item.audioByGroup = meta.audioByGroup;
+        item.audioDefault = meta.audioDefault || null;
       }
       // Record this master's child playlists and collapse them out of the list.
       if (meta.childUrls && meta.childUrls.length) {
@@ -1079,10 +1103,20 @@ async function startDownload(item, btn, opts = {}) {
       // variant's URL directly. offscreen.js will see a media playlist (no
       // STREAM-INF lines) and skip the master-pick branch.
       const streamUrl = (item.kind === 'hls' && item.selectedVariantUrl) || item.url;
+      // Split-track HLS: a bare variant URL carries no audio info, so resolve
+      // the matching audio rendition (by the variant's AUDIO group, else the
+      // master's default) here. When we send the master itself, offscreen
+      // derives the audio from it directly and this stays null.
+      let audioUrl = null;
+      if (item.kind === 'hls' && streamUrl !== item.url && item.audioByGroup) {
+        const chosen = (item.variants || []).find((v) => v.url === streamUrl);
+        audioUrl = (chosen?.audioGroup && item.audioByGroup[chosen.audioGroup]) || item.audioDefault || null;
+      }
       const res = await chrome.runtime.sendMessage({
         type: 'download-stream',
         format: item.kind,
         url: streamUrl,
+        audioUrl,
         itemUrl: item.url, // canonical row key (variant URL may differ)
         filename,
         saveAs,

@@ -7,6 +7,7 @@
 import {
   parseM3U8,
   pickBestVariant,
+  pickAudioRendition,
   importAesKey,
   decryptSegment,
   parseHexIV,
@@ -37,7 +38,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === 'fetch-stream') {
     log('received fetch-stream', { jobId: msg.jobId, format: msg.format, url: msg.url, saveAs: !!msg.saveAs });
     const runner = msg.format === 'dash' ? runDashJob : runHlsJob;
-    runner(msg.jobId, msg.url, msg.filename, !!msg.saveAs).catch((err) => {
+    runner(msg.jobId, msg.url, msg.filename, !!msg.saveAs, msg.audioUrl || null).catch((err) => {
       warn('job failed', err);
       sendStatus({ type: 'stream-error', jobId: msg.jobId, error: String(err?.message || err) });
     });
@@ -211,6 +212,10 @@ function muxAvToMp4(videoParts, audioParts) {
               duration: t.duration || 0,
               language: t.language || 'und',
               description: cfg,
+              // mp4box defaults hdlr to "vide" for EVERY track — an audio track
+              // written that way plays in lenient players (Chrome classifies by
+              // the mp4a sample entry) but strict ones drop the audio.
+              hdlr: kind === 'video' ? 'vide' : 'soun',
             };
             if (kind === 'video') {
               opts.width = (t.video && t.video.width) || t.track_width || 0;
@@ -361,8 +366,8 @@ async function finalize(jobId, parts, ext, baseFilename, totalSteps, saveAs, war
   sendStatus({ type: 'stream-done', jobId, filename: finalName, downloadId: result.downloadId, bytes: blob.size, warning });
 }
 
-async function runHlsJob(jobId, playlistUrl, baseFilename, saveAs) {
-  log('HLS job start', { jobId, playlistUrl, saveAs: !!saveAs });
+async function runHlsJob(jobId, playlistUrl, baseFilename, saveAs, audioUrlHint = null) {
+  log('HLS job start', { jobId, playlistUrl, saveAs: !!saveAs, audioUrlHint: !!audioUrlHint });
   sendStatus({ type: 'stream-progress', jobId, phase: 'manifest', current: 0, total: 1 });
 
   let manifestText;
@@ -376,12 +381,21 @@ async function runHlsJob(jobId, playlistUrl, baseFilename, saveAs) {
     isMaster: parsed.isMaster,
     variants: parsed.variants.length,
     segments: parsed.segments.length,
+    audioRenditions: parsed.audioRenditions.length,
   });
+
+  // Split-track HLS (X/Twitter fmp4 and similar): video variants carry NO
+  // audio; the audio lives in #EXT-X-MEDIA renditions. Resolve the audio URL
+  // from the master when we have it, else trust the hint threaded in from the
+  // popup (which parsed the master during its probe — the variant-picker path
+  // hands us the bare variant URL, so the master never reaches this job).
+  let audioUrl = audioUrlHint;
 
   if (parsed.isMaster) {
     if (parsed.variants.length === 0) throw new Error('Master playlist has no variants');
     const variant = pickBestVariant(parsed.variants);
     log('picked variant', variant);
+    audioUrl = pickAudioRendition(parsed, variant) || audioUrl;
     sendStatus({
       type: 'stream-progress',
       jobId,
@@ -398,6 +412,19 @@ async function runHlsJob(jobId, playlistUrl, baseFilename, saveAs) {
     throw new Error('No segments in HLS playlist (live stream without #EXT-X-ENDLIST?)');
   }
 
+  // Fetch + parse the audio rendition up front so the progress total covers
+  // both tracks. Any failure here degrades to the old video-only behavior.
+  let audioParsed = null;
+  if (audioUrl) {
+    try {
+      audioParsed = parseM3U8(await fetchText(audioUrl), audioUrl);
+      if (audioParsed.segments.length === 0) audioParsed = null;
+    } catch (err) {
+      warn('audio rendition playlist fetch failed, continuing video-only:', err?.message || err);
+      audioParsed = null;
+    }
+  }
+
   const keyCache = new Map();
   const decryptor = async (bytes, seg) => {
     if (!seg.key) return bytes;
@@ -411,10 +438,15 @@ async function runHlsJob(jobId, playlistUrl, baseFilename, saveAs) {
     return new Uint8Array(plain);
   };
 
-  const totalSteps = (parsed.initSegment ? 1 : 0) + parsed.segments.length;
+  const videoSteps = (parsed.initSegment ? 1 : 0) + parsed.segments.length;
+  const audioSteps = audioParsed
+    ? (audioParsed.initSegment ? 1 : 0) + audioParsed.segments.length
+    : 0;
+  const totalSteps = videoSteps + audioSteps;
   const parts = await downloadSegments({ jobId, parsed, totalSteps, decryptor });
   let ext = guessOutputExtension(parsed.segments, parsed.initSegment);
   let outParts = parts;
+  let warning = null;
 
   // MPEG-TS segments concatenate into a valid .ts, but users expect .mp4 and
   // many players won't open .ts. Transmux to MP4 (no re-encode). Fall back to
@@ -433,7 +465,25 @@ async function runHlsJob(jobId, playlistUrl, baseFilename, saveAs) {
     }
   }
 
-  await finalize(jobId, outParts, ext, baseFilename, totalSteps, saveAs);
+  // Mux the separate audio rendition in (same machinery as split DASH). On any
+  // failure keep the old video-only output, flagged so the popup says so.
+  if (audioParsed) {
+    try {
+      const audioParts = await downloadSegments({
+        jobId, parsed: audioParsed, totalSteps, decryptor, startAt: videoSteps,
+      });
+      if (ext !== 'mp4') throw new Error(`cannot mux separate audio into a .${ext} output`);
+      sendStatus({ type: 'stream-progress', jobId, phase: 'remux', current: totalSteps, total: totalSteps });
+      log('muxing HLS video variant + audio rendition → MP4');
+      outParts = await muxAvToMp4(outParts, audioParts);
+      log('mux done');
+    } catch (err) {
+      warn('HLS audio mux failed, saving video-only:', err?.message || err);
+      warning = 'Saved without audio — the audio track could not be merged.';
+    }
+  }
+
+  await finalize(jobId, outParts, ext, baseFilename, totalSteps, saveAs, warning);
 }
 
 // Download a complete media file, streaming so we can report progress.
