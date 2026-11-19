@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "VidLoad",
-  "version": "0.4.33",
+  "version": "0.4.34",
   "description": "Save videos from any webpage to your computer.",
   "permissions": ["downloads", "storage", "webRequest", "offscreen", "declarativeNetRequestWithHostAccess"],
   "host_permissions": ["<all_urls>"],

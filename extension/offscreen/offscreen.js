@@ -183,10 +183,31 @@ function muxAvToMp4(videoParts, audioParts) {
     const out = MP4Box.createFile();
     let pending = 2;
     let settled = false;
+    // Real duration per output track (summed sample durations, in the track's
+    // own timescale). Fragmented inputs report t.duration = 0, so without this
+    // the output's mvhd/tkhd/mdhd all say 0 — ffmpeg shrugs (it derives from
+    // the sample tables) but Windows Media Foundation can't even read the
+    // file's length and won't start the audio pipeline → "plays but silent".
+    const trackDurations = {}; // outId -> { sum, timescale }
     const fail = (m) => { if (!settled) { settled = true; reject(new Error(m)); } };
     const tryFinish = () => {
       if (settled || pending > 0) return;
       try {
+        try {
+          const mvhd = out.moov && out.moov.mvhd;
+          if (mvhd) {
+            let movieDur = 0;
+            for (const trak of out.moov.traks || []) {
+              const rec = trackDurations[trak.tkhd.track_id];
+              if (!rec || !rec.sum) continue;
+              trak.mdia.mdhd.duration = rec.sum;
+              const tk = Math.round((rec.sum / rec.timescale) * mvhd.timescale);
+              trak.tkhd.duration = tk;
+              if (tk > movieDur) movieDur = tk;
+            }
+            if (movieDur > 0) mvhd.duration = movieDur;
+          }
+        } catch (e) { warn('duration backfill skipped:', e?.message || e); }
         const buf = out.getBuffer();
         if (!buf || buf.byteLength < 1024) { fail('mux produced empty output'); return; }
         settled = true;
@@ -229,6 +250,7 @@ function muxAvToMp4(videoParts, audioParts) {
             log(`mux ${kind} track`, { type: entry.type, hasConfig: !!cfg, outId });
 
             let n = 0;
+            let sumDur = 0;
             inFile.setExtractionOptions(t.id, null, { nbSamples: 10_000_000 });
             inFile.onSamples = (id, user, samples) => {
               for (const s of samples) {
@@ -236,12 +258,14 @@ function muxAvToMp4(videoParts, audioParts) {
                   duration: s.duration, cts: s.cts, dts: s.dts, is_sync: s.is_sync,
                 });
                 n += 1;
+                sumDur += s.duration || 0;
               }
             };
             inFile.start();
             inFile.flush();
             log(`mux ${kind} samples`, n);
             if (n === 0) { fail(`${kind} stream had no samples`); return; }
+            trackDurations[outId] = { sum: sumDur, timescale: t.timescale || 1 };
             pending -= 1;
             tryFinish();
           } catch (e) { fail(`${kind} mux setup: ${e?.message || e}`); }
