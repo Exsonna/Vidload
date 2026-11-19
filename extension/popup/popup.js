@@ -296,9 +296,42 @@ function keepScore(item) {
   let s = 0;
   if (item.variants && item.variants.length > 1) s += 1000;
   if (item.kind === 'hls' || item.kind === 'dash') s += 100;
-  try { if (!/\/\d{2,4}x\d{2,4}\//.test(new URL(item.url).pathname)) s += 40; } catch {}
+  try {
+    const p = new URL(item.url).pathname;
+    if (!/\/\d{2,4}x\d{2,4}\//.test(p)) s += 40;
+    // An audio-only rendition playlist (twimg /mp4a/) must never become the
+    // group's visible row — it has no WxH in its path, so without this it can
+    // outscore the real video variants when the master was never captured.
+    if (/\/mp4a\//.test(p)) s -= 500;
+  } catch {}
   s += Math.min(30, Math.round((item.estimatedBytes || item.bytes || 0) / 1e6));
   return s;
+}
+
+// Master-less pairing: when a bare video-variant row has no probe-derived audio
+// info (its master playlist was never captured), the matching /mp4a/ audio
+// rendition usually WAS captured — it sits collapsed in the same per-video
+// group. Dig it out so the download can still be muxed with sound.
+function findGroupAudioUrl(item) {
+  const key = videoGroupKey(item);
+  if (!key) return null;
+  for (const it of allItems) {
+    if (!it || it.url === item.url) continue;
+    if (videoGroupKey(it) !== key) continue;
+    try { if (/\/mp4a\//.test(new URL(it.url).pathname)) return it.url; } catch {}
+  }
+  return null;
+}
+
+// What we can honestly say about a row's sound BEFORE downloading. Only
+// split-track hosts (the twimg group) can produce silent files, so only those
+// rows get a verdict; everywhere else audio travels inside the stream and we
+// say nothing rather than guess.
+function audioStatusFor(item) {
+  if (item?.kind !== 'hls' || !videoGroupKey(item)) return null;
+  if (item.audioByGroup && Object.keys(item.audioByGroup).length) return 'yes';
+  if (findGroupAudioUrl(item)) return 'yes';
+  return 'no';
 }
 
 function computeCollapsedUrls(items) {
@@ -932,6 +965,20 @@ function renderRow(item) {
     if (item.kind) formatBadge.classList.add(item.kind);
   }
 
+  // Audio verdict (split-track hosts only): tells the user BEFORE downloading
+  // whether this row will have sound. A master row flips to ♪ as soon as its
+  // probe resolves the audio renditions (the probe triggers a re-render).
+  const audioStatus = audioStatusFor(item);
+  if (formatBadge && audioStatus) {
+    const audioPill = document.createElement('span');
+    audioPill.className = `audio-pill ${audioStatus}`;
+    audioPill.textContent = audioStatus === 'yes' ? '♪ audio' : 'no audio';
+    audioPill.title = audioStatus === 'yes'
+      ? 'Audio track found — the download will include sound.'
+      : 'No audio source detected for this item — the download would be silent.';
+    formatBadge.after(audioPill);
+  }
+
   // Split-source (mux) items carry their qualities in videoVariants — reuse the
   // variant picker for them.
   if (item.kind === 'mux' && item.videoVariants && !item.variants) {
@@ -1111,6 +1158,12 @@ async function startDownload(item, btn, opts = {}) {
       if (item.kind === 'hls' && streamUrl !== item.url && item.audioByGroup) {
         const chosen = (item.variants || []).find((v) => v.url === streamUrl);
         audioUrl = (chosen?.audioGroup && item.audioByGroup[chosen.audioGroup]) || item.audioDefault || null;
+      }
+      // Master-less bare variant: pair with the /mp4a/ rendition captured in
+      // the same per-video group (safe as a hint — when the sent URL turns out
+      // to be a master, offscreen's own derivation takes precedence).
+      if (item.kind === 'hls' && !audioUrl && !item.audioByGroup) {
+        audioUrl = findGroupAudioUrl(item);
       }
       const res = await chrome.runtime.sendMessage({
         type: 'download-stream',

@@ -413,15 +413,18 @@ async function runHlsJob(jobId, playlistUrl, baseFilename, saveAs, audioUrlHint 
   }
 
   // Fetch + parse the audio rendition up front so the progress total covers
-  // both tracks. Any failure here degrades to the old video-only behavior.
+  // both tracks. Any failure here degrades to video-only — but FLAGGED, so the
+  // popup never reports a silent file as a plain success.
   let audioParsed = null;
+  let audioFetchFailed = false;
   if (audioUrl) {
     try {
       audioParsed = parseM3U8(await fetchText(audioUrl), audioUrl);
-      if (audioParsed.segments.length === 0) audioParsed = null;
+      if (audioParsed.segments.length === 0) { audioParsed = null; audioFetchFailed = true; }
     } catch (err) {
       warn('audio rendition playlist fetch failed, continuing video-only:', err?.message || err);
       audioParsed = null;
+      audioFetchFailed = true;
     }
   }
 
@@ -446,7 +449,9 @@ async function runHlsJob(jobId, playlistUrl, baseFilename, saveAs, audioUrlHint 
   const parts = await downloadSegments({ jobId, parsed, totalSteps, decryptor });
   let ext = guessOutputExtension(parsed.segments, parsed.initSegment);
   let outParts = parts;
-  let warning = null;
+  let warning = audioFetchFailed
+    ? 'Saved without audio — the audio track could not be fetched.'
+    : null;
 
   // MPEG-TS segments concatenate into a valid .ts, but users expect .mp4 and
   // many players won't open .ts. Transmux to MP4 (no re-encode). Fall back to
