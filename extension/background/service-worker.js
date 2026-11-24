@@ -411,7 +411,7 @@ async function upsertItem(tabId, item) {
   const key = dedupKey(item.url);
   const existing = items.find((it) => dedupKey(it.url) === key);
   if (existing) {
-    for (const k of ['poster', 'width', 'height', 'duration', 'pageTitle', 'description', 'contextLabel']) {
+    for (const k of ['poster', 'posterCtx', 'width', 'height', 'duration', 'pageTitle', 'description', 'contextLabel']) {
       if (existing[k] == null && item[k] != null) existing[k] = item[k];
     }
     if (item.bytes && (!existing.bytes || item.bytes > existing.bytes)) {
@@ -577,7 +577,13 @@ async function backfillContext(tabId) {
       if (ctx?.label && !item.contextLabel) { item.contextLabel = ctx.label; changed = true; }
       if (title && !item.pageTitle) { item.pageTitle = title; changed = true; }
       for (const f of CONTEXT_FIELDS) {
-        if (ctx?.[f] != null && item[f] == null) { item[f] = ctx[f]; changed = true; }
+        if (ctx?.[f] != null && item[f] == null) {
+          item[f] = ctx[f];
+          // A context poster is a guess (the viewport-center video's) — flag it
+          // so the popup can decline to show it where it tends to be wrong.
+          if (f === 'poster') item.posterCtx = true;
+          changed = true;
+        }
       }
     }
     if (changed) await setTabItems(tabId, items);
@@ -928,6 +934,7 @@ chrome.webRequest.onHeadersReceived.addListener(
       contextLabel: seg ? null : (ctx.label || null),
       pageTitle: seg ? null : (pageTitles.get(details.tabId) || null),
       poster: seg ? null : (ctx.poster || null),
+      posterCtx: seg ? null : (ctx.poster ? true : null),
       duration: seg ? null : (ctx.duration || null),
       width: seg ? null : (ctx.width || null),
       height: seg ? null : (ctx.height || null),

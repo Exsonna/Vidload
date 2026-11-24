@@ -62,6 +62,10 @@ let menuTarget = null; // { item, rowEl }
 }
 
 const MIN_DIRECT_BYTES = 100 * 1024;
+// Items loaded much earlier than the newest capture are almost never what the
+// user wants (feed scrolling accumulates every autoplayed video) — fold them
+// behind the "Show hidden" toggle instead of listing them up front.
+const STALE_WINDOW_MS = 120_000;
 
 const activeJobs = new Map();   // jobId -> item url (routes live stream messages)
 const jobByUrl = new Map();      // item url -> { status, phase, current, total, error }
@@ -912,7 +916,14 @@ function render() {
   try {
     const filtered = allItems.filter((it) => it && !dismissed.has(it.url));
     collapsedUrls = computeCollapsedUrls(filtered); // group same-video duplicates
-    const visible = showHidden ? filtered : filtered.filter((it) => !isFilteredOut(it));
+    const passing = filtered.filter((it) => !isFilteredOut(it));
+    // Fold stale items (loaded ≥2 min before the newest capture) behind the
+    // toggle; the video the user wants is almost always the freshest. The
+    // newest item itself is never folded, so single-video pages are unaffected.
+    const maxTs = passing.reduce((m, it) => Math.max(m, it.ts || 0), 0);
+    const fresh = passing.filter((it) => !it.ts || maxTs - it.ts <= STALE_WINDOW_MS);
+    // Newest first — the row for the video being watched sits on top.
+    const visible = (showHidden ? filtered.slice() : fresh).sort((a, b) => (b.ts || 0) - (a.ts || 0));
     const hiddenCount = filtered.length - visible.length;
 
     listEl.replaceChildren();
@@ -929,7 +940,7 @@ function render() {
     if (visible.length === 0) {
       statusEl.textContent = `${filtered.length} item${filtered.length === 1 ? '' : 's'} detected — all filtered as probes/segments.`;
     } else if (hiddenCount > 0) {
-      statusEl.textContent = `${visible.length} video${visible.length === 1 ? '' : 's'} · ${hiddenCount} small item${hiddenCount === 1 ? '' : 's'} hidden.`;
+      statusEl.textContent = `${visible.length} video${visible.length === 1 ? '' : 's'} · ${hiddenCount} hidden.`;
     } else {
       statusEl.textContent = `${visible.length} video${visible.length === 1 ? '' : 's'} detected.`;
     }
@@ -937,8 +948,8 @@ function render() {
     if (toggleEl) {
       toggleEl.hidden = hiddenCount === 0 && !showHidden;
       toggleEl.textContent = showHidden
-        ? 'Hide small probe items'
-        : `Show ${hiddenCount} hidden small item${hiddenCount === 1 ? '' : 's'}`;
+        ? 'Hide extra items'
+        : `Show ${hiddenCount} hidden item${hiddenCount === 1 ? '' : 's'} (earlier / small)`;
     }
 
     visible.forEach((item) => {
@@ -1059,7 +1070,12 @@ function renderRow(item) {
 
   const thumbImg = node.querySelector('.thumb-img');
   if (thumbImg) {
-    if (item.poster) {
+    // A context-stamped poster is a guess (whatever video sat at viewport
+    // center when this stream was captured). On grouped multi-video hosts
+    // (twimg) that guess is wrong often enough to mislead — show the neutral
+    // play placeholder there instead. Real posters (adapter/DOM) still show.
+    const posterTrusted = item.poster && !(item.posterCtx && videoGroupKey(item));
+    if (posterTrusted) {
       thumbImg.src = item.poster;
       thumbImg.addEventListener('error', () => thumbImg.classList.add('broken'), { once: true });
     } else {
