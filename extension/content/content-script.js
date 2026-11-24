@@ -388,9 +388,26 @@ function updateActiveContext() {
   } catch (_) { /* extension context invalidated mid-navigation */ }
 }
 
+// SPA navigation (x.com and similar swap posts via pushState without a page
+// load): when the top frame's URL changes, tell the SW to drop this tab's
+// accumulated items so the popup lists only the post the user is looking at,
+// and reset our own dedupe state so the new page's media gets re-reported.
+let lastHref = location.href;
+function checkSpaNavigation() {
+  if (!IS_TOP_FRAME || location.href === lastHref) return;
+  lastHref = location.href;
+  seen.clear();
+  lastContextSig = null;
+  lastTitle = null;
+  try {
+    chrome.runtime.sendMessage({ type: 'page-navigated' });
+  } catch (_) { /* extension context invalidated mid-navigation */ }
+}
+
 function scheduleUpdate(delay = 200) {
   clearTimeout(updateTimer);
   updateTimer = setTimeout(() => {
+    checkSpaNavigation();
     updateActiveContext();
     report();
     broadcastPageTitle();

@@ -368,12 +368,13 @@ function isFilteredOut(item) {
   // showing — collapse it into the master row.
   if (item.kind === 'hls' && hlsChildKeys.has(playlistKey(item.url))) return true;
   if (item.kind !== 'direct') return false;
+  // A known-tiny direct file is never a real video, whichever source reported
+  // it — the ~16 KB preview mp4 scraped by site adapters, probe responses, the
+  // 786 B audio-init case — even when context stamped a poster/duration on it.
+  if (item.bytes != null && item.bytes < MIN_DIRECT_BYTES) return true;
   if (item.source !== 'network') return false;
   // .m4s / .ts are HLS/DASH sub-segments, never standalone videos.
   if (looksLikeStreamSegment(item)) return true;
-  // A tiny "direct" response is a probe/redirect, not a video — hide it even if
-  // the active-context channel stamped a poster/duration onto it (the 786 B case).
-  if (item.bytes != null && item.bytes < MIN_DIRECT_BYTES) return true;
   if (hasMetadata(item)) return false;
   return false;
 }

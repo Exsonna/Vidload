@@ -610,6 +610,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 
+  if (msg?.type === 'page-navigated' && sender.tab?.id !== undefined) {
+    // SPA navigation in the top frame: drop the tab's accumulated items so the
+    // popup only lists media belonging to the page the user is now on.
+    setTabItems(sender.tab.id, []);
+    activeContexts.delete(sender.tab.id);
+    pageTitles.delete(sender.tab.id);
+    return false;
+  }
+
   // Offscreen stream events — mirror into the job table so a reopened popup
   // can restore progress. These messages are broadcast (no target); the popup
   // listens too for live updates.
