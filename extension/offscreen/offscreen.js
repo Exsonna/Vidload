@@ -183,22 +183,45 @@ function muxAvToMp4(videoParts, audioParts) {
     const out = MP4Box.createFile();
     let pending = 2;
     let settled = false;
-    // Real duration per output track (summed sample durations, in the track's
-    // own timescale). Fragmented inputs report t.duration = 0, so without this
-    // the output's mvhd/tkhd/mdhd all say 0 — ffmpeg shrugs (it derives from
-    // the sample tables) but Windows Media Foundation can't even read the
-    // file's length and won't start the audio pipeline → "plays but silent".
-    const trackDurations = {}; // outId -> { sum, timescale }
+    const collected = []; // { outId, kind, samples, timescale } per ingested track
     const fail = (m) => { if (!settled) { settled = true; reject(new Error(m)); } };
-    const tryFinish = () => {
+
+    const finish = () => {
       if (settled || pending > 0) return;
       try {
+        // Interleave samples across tracks in ~1-second windows. Real-world
+        // players (VLC's mp4 demuxer in particular) expect audio chunks laid
+        // out near their video neighbours; our previous all-video-then-all-
+        // audio layout left the audio track unplayed in them.
+        const idx = new Map(collected.map((r) => [r, 0]));
+        const sums = {}; // outId -> { sum, timescale } — real durations for the header backfill
+        for (let windowEnd = 1; windowEnd < 1e6; windowEnd++) {
+          let remaining = false;
+          for (const r of collected) {
+            const limit = windowEnd * r.timescale;
+            let i = idx.get(r);
+            while (i < r.samples.length && (r.samples[i].dts || 0) < limit) {
+              const s = r.samples[i++];
+              out.addSample(r.outId, s.data, {
+                duration: s.duration, cts: s.cts, dts: s.dts, is_sync: s.is_sync,
+              });
+              const rec = sums[r.outId] || (sums[r.outId] = { sum: 0, timescale: r.timescale });
+              rec.sum += s.duration || 0;
+            }
+            idx.set(r, i);
+            if (i < r.samples.length) remaining = true;
+          }
+          if (!remaining) break;
+        }
+        // Backfill real durations into mvhd/tkhd/mdhd. Fragmented inputs report
+        // t.duration = 0; a 0-length header makes Windows Media Foundation fail
+        // to read the file's length and never start its audio pipeline.
         try {
           const mvhd = out.moov && out.moov.mvhd;
           if (mvhd) {
             let movieDur = 0;
             for (const trak of out.moov.traks || []) {
-              const rec = trackDurations[trak.tkhd.track_id];
+              const rec = sums[trak.tkhd.track_id];
               if (!rec || !rec.sum) continue;
               trak.mdia.mdhd.duration = rec.sum;
               const tk = Math.round((rec.sum / rec.timescale) * mvhd.timescale);
@@ -212,7 +235,7 @@ function muxAvToMp4(videoParts, audioParts) {
         if (!buf || buf.byteLength < 1024) { fail('mux produced empty output'); return; }
         settled = true;
         resolve([new Uint8Array(buf)]);
-      } catch (e) { fail('mux getBuffer failed: ' + (e?.message || e)); }
+      } catch (e) { fail('mux finalize failed: ' + (e?.message || e)); }
     };
 
     const ingest = (parts, kind) => {
@@ -227,10 +250,22 @@ function muxAvToMp4(videoParts, audioParts) {
             const inTrak = inFile.getTrackById(t.id);
             const entry = inTrak.mdia.minf.stbl.stsd.entries[0];
             const cfg = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C || entry.esds || entry.dOps || null;
+            // Normalize the audio track to its real sample rate. X ships audio
+            // with timescale 441000 (10× the 44100 sample rate) — spec-legal,
+            // but picky demuxers mishandle it. Rescale timestamps by the exact
+            // integer factor; non-integer ratios are left untouched.
+            let timescale = t.timescale;
+            let tsDiv = 1;
+            const sampleRate = (t.audio && t.audio.sample_rate)
+              || (t.timescale <= 65535 ? t.timescale : 44100);
+            if (kind === 'audio' && sampleRate > 0 && timescale !== sampleRate && timescale % sampleRate === 0) {
+              tsDiv = timescale / sampleRate;
+              timescale = sampleRate;
+            }
             const opts = {
               type: entry.type,
-              timescale: t.timescale,
-              duration: t.duration || 0,
+              timescale,
+              duration: 0, // backfilled from real sample durations in finish()
               language: t.language || 'und',
               description: cfg,
               // mp4box defaults hdlr to "vide" for EVERY track — an audio track
@@ -243,31 +278,32 @@ function muxAvToMp4(videoParts, audioParts) {
               opts.height = (t.video && t.video.height) || t.track_height || 0;
             } else {
               opts.channel_count = (t.audio && t.audio.channel_count) || 2;
-              opts.samplerate = (t.audio && t.audio.sample_rate) || t.timescale;
+              opts.samplerate = sampleRate;
               opts.samplesize = (t.audio && t.audio.sample_size) || 16;
             }
             const outId = out.addTrack(opts);
-            log(`mux ${kind} track`, { type: entry.type, hasConfig: !!cfg, outId });
+            log(`mux ${kind} track`, { type: entry.type, hasConfig: !!cfg, outId, timescale, tsDiv });
 
-            let n = 0;
-            let sumDur = 0;
+            const samples = [];
             inFile.setExtractionOptions(t.id, null, { nbSamples: 10_000_000 });
-            inFile.onSamples = (id, user, samples) => {
-              for (const s of samples) {
-                out.addSample(outId, s.data, {
-                  duration: s.duration, cts: s.cts, dts: s.dts, is_sync: s.is_sync,
+            inFile.onSamples = (id, user, batch) => {
+              for (const s of batch) {
+                samples.push({
+                  data: s.data,
+                  duration: Math.round((s.duration || 0) / tsDiv),
+                  cts: Math.round((s.cts || 0) / tsDiv),
+                  dts: Math.round((s.dts || 0) / tsDiv),
+                  is_sync: s.is_sync,
                 });
-                n += 1;
-                sumDur += s.duration || 0;
               }
             };
             inFile.start();
             inFile.flush();
-            log(`mux ${kind} samples`, n);
-            if (n === 0) { fail(`${kind} stream had no samples`); return; }
-            trackDurations[outId] = { sum: sumDur, timescale: t.timescale || 1 };
+            log(`mux ${kind} samples`, samples.length);
+            if (samples.length === 0) { fail(`${kind} stream had no samples`); return; }
+            collected.push({ outId, kind, samples, timescale });
             pending -= 1;
-            tryFinish();
+            finish();
           } catch (e) { fail(`${kind} mux setup: ${e?.message || e}`); }
         };
         inFile.appendBuffer(concatToFileBuffer(parts));
