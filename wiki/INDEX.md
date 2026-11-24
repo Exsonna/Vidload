@@ -29,6 +29,7 @@ _People, companies, products. Add as `- [[Name]] — one-line tag`._
 
 ## Recently revised
 
+- 2026-11-24: [[hls-download-approach]] — **X split-track audio + player-standard mux** (v0.4.32–38: 音轨合成、hdlr/时长/timescale/交错四连修，VLC+WMF 实测)；[[webstore-submission]] — v0.4.38 **不传商店**（Anson 自用）。See `chats/2026-11-24-x-audio-marathon.md`; HANDOFF.md 已从 stub 写实。
 - 2026-07-14: [[monetization]] — **funnel overhaul** (v0.4.29): 7-day trial + 3/day → 10 lifetime free → $4.99; pay-flow fixes. [[webstore-submission]] — v0.4.28 + v0.4.29 packages, submitted for review. Preceded by a full Fable audit (v0.4.28, 23 verified findings fixed) + a "why no paid users" monetization audit. See `chats/2026-07-14-audit-monetization-overhaul.md`.
 - 2026-06-11: [[platform-health-canary]] — new (weekly checkup scheduled); [[webstore-submission]] — auto-update behavior added; [[monetization]] — **LIVE**; [[youtube-capture-approach]] — new; [[dash-download-approach]]/[[hls-download-approach]] — muxing/transmux (see `chats/2026-06-11-monetization-golive.md`)
 - [[offscreen-api-limits]] — 2026-05-16 — new note from v0.4.8 chrome.downloads-in-offscreen fix
