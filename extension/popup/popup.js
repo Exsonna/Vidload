@@ -357,6 +357,13 @@ function isFilteredOut(item) {
   if (!item) return true;
   // A duplicate URL for a video we're already showing (see computeCollapsedUrls).
   if (collapsedUrls.has(item.url)) return true;
+  // A twimg /mp4a/ playlist is the AUDIO rendition of some video, never a video
+  // itself — hide it unconditionally (group collapse only catches it when its
+  // video siblings were captured too; alone it surfaced as a clickable row and
+  // downloaded a bare audio file). The mux pipeline fetches it internally.
+  if (item.kind === 'hls' && videoGroupKey(item)) {
+    try { if (/\/mp4a\//.test(new URL(item.url).pathname)) return true; } catch {}
+  }
   // An HLS playlist that is a child (variant/audio) of a master we're already
   // showing — collapse it into the master row.
   if (item.kind === 'hls' && hlsChildKeys.has(playlistKey(item.url))) return true;
